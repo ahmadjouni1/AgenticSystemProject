@@ -1,0 +1,44 @@
+Replica: a step-by-step rebuild of Articraft, made to understand it.
+
+This project is inspired by, and includes code adapted from, Articraft:
+
+  Articraft
+  https://github.com/mattzh72/articraft
+  Paper: https://arxiv.org/abs/2605.15187
+
+Articraft is licensed under the Apache License, Version 2.0. A copy of that license
+is included in LICENSES/Apache-2.0.txt. The adapted portions remain under the Apache
+License 2.0. Files that contain adapted material carry a notice at the top
+("Portions adapted from Articraft ... and modified for this replica").
+
+What was adapted, file by file (all were modified; none is a verbatim copy of a whole
+Articraft module):
+
+- sdk/frames.py
+  The rules for turning build123d features into joint frames (face normal or axis of
+  symmetry, edge tangent or circle normal), from articraft/sdk/frames.py.
+- sdk/profiles.py
+  rounded_rect_profile and superellipse_profile (names, arguments, formulas), from
+  articraft/sdk/_mesh/profiles.py.
+- sdk/primitives.py, sdk/solids.py, sdk/sweeps.py, sdk/mesh_geometry.py, sdk/booleans.py
+  The public names, arguments and defaults of Articraft's mesh helpers (BoxGeometry ...
+  LatheGeometry, LoftGeometry, PipeGeometry, wire_from_points, tube_from_spline_points,
+  section_loft, boolean_union ...), the MeshGeometry method set, placement conventions,
+  and the lathe shell lip connector (_cap_connector), from articraft/sdk/_mesh/*.
+  The geometry code itself was rewritten.
+- sdk/kinematics.py
+  The loop-closure approach (articulation tree plus closure joints, bounded
+  least-squares solve, joints pinned at limits reported in LoopClosureError), from
+  articraft/sdk/assembly.py. Rewritten.
+- compiler/worker.py, compiler/runner.py, compiler/feedback.py
+  The compile design: fresh worker process, runpy, phase progress file, one JSON
+  payload, typed compile signals rendered as a <compile_signals> block with response
+  rules and repeat detection, and some rule and hint wording, from
+  articraft/compiler/* and articraft/agent/workspace/local.py. Rewritten and extended.
+- docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
+  A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
+  source for commentary, and an inventory of its mesh helpers.
+
+Everything else (export to URDF/GLB, mimic joints, the walking warm start, the
+Windows process-tree handling, the tests, and the examples) was written for this
+project.

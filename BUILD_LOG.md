@@ -894,3 +894,187 @@ full swing cross by 20 mm. The test also checks the Gray-code order and the 64-c
 | **all 8** | | | | | | | **1.89 s** (budget < 3 s; 1.9-2.3 s across runs) |
 
 219 tests pass.
+
+## Step 5: Viewer
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `viewer/loader.py` | 109 | `load_version(folder)`: rebuilds a kinematic model from `model.json` + `model.glb`. It gives the sliders and the mode ("tree" or "loop"), and `solve(values)` |
+| `viewer/server.py` | 195 | stdlib `ThreadingHTTPServer` on 127.0.0.1: the page, vendored three.js, versions, the GLB, and `POST /pose` for loops |
+| `viewer/__main__.py` | 43 | `python -m viewer <run>`: prints the URL, opens the browser, Ctrl+C stops |
+| `viewer/static/kinematics.js` | 114 | Forward kinematics in JavaScript, a line-for-line port of the Python placement rule |
+| `viewer/static/app.js`, `index.html` | 314 + 75 | The page: version picker, sliders, Play, Rest pose, signals list, red highlight |
+| `viewer/static/vendor/three/` | (1.5 MB) | three.js r170 and three add-ons, unmodified, with its MIT `LICENSE` |
+| `compiler/worker.py`, `compiler/feedback.py`, `sdk/export.py` | (changed) | Signals carry `bodies`, `pose` and `amount`; each version gets `signals.json`; a build that fails its checks is exported to `result/last_failed` |
+| `tests/test_viewer.py`, `tests/js/pose_glb.mjs` | 202 + 43 | 16 tests |
+| `scripts/make_demo_runs.py` | 50 | Compiles `runs/four_bar`, `runs/drawer` and `runs/desk_lamp` for the viewer (`runs/` is git-ignored) |
+
+No new Python dependency. three.js is a vendored file, not a package.
+
+**Usage.**
+
+```shell
+uv run python scripts/make_demo_runs.py
+uv run python -m viewer runs/four_bar          # or runs/drawer, runs/desk_lamp
+uv run python -m viewer runs/four_bar/result/v0000 --port 8000 --no-browser
+```
+
+The argument can be a run folder, its `result/` folder, or one version folder.
+
+**The page.**
+- **Versions.** The picker lists them newest first. If the latest compile failed its checks,
+  "latest compile (failed checks)" comes first.
+- **Sliders.** One per driven joint, in degrees or mm. An unlimited revolute gets ±180°, an
+  unlimited prismatic ±1 m. Mimic joints have no slider; a note under the sliders says what
+  they follow (`y_follow = 1 × y_head`).
+- **Tree mechanisms.** The page computes every body transform in JavaScript from the
+  manifest. A slider tick makes no server call.
+- **Loop mechanisms.** The page POSTs the slider values. The server solves with the walking
+  warm start. Only one request is in flight; ticks that arrive meanwhile collapse into one
+  follow-up with the newest values. A pose that cannot close returns 409: the page keeps the
+  last good pose and shows the reason in red ("loop closure 'pin' stays open ...").
+- **Play.** Each driver in turn goes rest → upper → lower → rest, eased, 60 frames per leg.
+  For a loop that means the crank, and the solver moves the rest. Clicking again stops.
+- **Check overlay.** It lists the version's compile signals with severity colours. Clicking
+  a signal that has a pose or bodies:
+  - sets the sliders to the signal's full pose (a combined finding sets every joint);
+  - paints its bodies red;
+  - prints the message in the status bar.
+  Moving a slider clears the highlight.
+
+**Tree or loop.** A model is posed in the browser unless it has a loop closure that still
+leaves unknowns once the drivers are set (`loop_unknowns`). The gantry has a closure, but its
+mimic joints determine every joint, so it is a tree for the viewer. The four-bar is a loop.
+
+**Failed compiles are viewable.** A compile that fails its checks still makes no version (step
+3's rule), so before this step the model that failed was lost. Now:
+- the worker exports it to `result/last_failed` (built in a staging folder and moved into
+  place);
+- the next compile removes it first.
+
+The drawer fixture opens there:
+- signal `swept_collision`, bodies `cabinet` and `drawer`;
+- pose `slide = 260 mm` (first contact; the drawer's travel is 0-280 mm).
+
+### Tests (16)
+
+- **Loader = assembly** (8 examples). For each, the loaded model's body transforms equal
+  the original `assembly.solve()` within 1e-9 at the rest pose, 30% and 85% of every
+  slider's range. The four-bar includes its loop solve.
+- **Modes:** the four-bar is a loop with one slider (`crank_joint`, ±180°); the gantry is a
+  tree with `x_drive` and `y_head`.
+- **Server:**
+  - the page, `three.module.js` as `text/javascript` (Windows can map `.js` to
+    `text/plain`, and browsers then refuse ES modules), the license, versions, the
+    described version, and the GLB;
+  - `static/../` is refused.
+- **Four-bar pose endpoint:**
+  - `crank_joint = 1.0` returns the same matrices as Python, plus the solved `rocker_joint`;
+  - with the rocker limited to ±0.05 rad, `crank = π` returns 409 with the closure reason;
+  - the next reachable pose still returns 200;
+  - a non-number returns 400.
+- **JavaScript = Python** (laptop and gantry, 3 poses each, under Node.js):
+  - `kinematics.js` body transforms match `assembly.solve()` within 1e-9;
+  - the GLB is parsed by the vendored `GLTFLoader` and posed exactly as the page does it
+    (`localMatrices` into `node.matrix`);
+  - three.js's world matrices then match `z_up_to_y_up @ T` within 1e-5 (float32).
+
+  This covers the whole browser posing path except drawing. Node has no import map, so the
+  test stages a temporary `node_modules/three` that points at the vendored file. The test is
+  skipped when `node` is not installed (here: Node 24.13.1).
+- **Failed compile:** the drawer compiles with status "error" and no `vNNNN`. The server
+  lists only `last_failed`, and its signal has kind, bodies and pose.
+- **CLI:** a missing folder exits with code 2.
+
+**235 tests pass** (about 70 s).
+
+**Not verified in this session: the page in a real browser.** I could not open a browser
+here, so rendering, OrbitControls, the slider feel and the red highlight have not been
+looked at. Everything up to the matrices three.js draws with is tested, and the CLI was
+started on `runs/drawer` and answered over HTTP. A first manual look is the next check.
+
+### How Articraft does it (study §5)
+
+- **Files:** `viewer.py` (`load_viewer_run`, `kinematics_from_usdz`, `_solve_pose`,
+  `_handler`) and `viewer.html`.
+- **Server:** `articraft view <run>` runs a stdlib `ThreadingHTTPServer` on 127.0.0.1 and
+  lists each numbered USDZ as a version.
+- **Three.js** 0.185.1 is loaded from a CDN.
+- **Every slider tick** POSTs to `/api/pose/N`. The server rebuilds kinematics from the USDZ
+  (cached), runs `forward_kinematics`, and returns a 4x4 per body.
+- **An unreachable pose** returns 409, and the page keeps the last good pose.
+- **Compile results:** the study records none in the viewer; it shows geometry and sliders.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| three.js vendored (r170, MIT license kept) instead of a CDN | Works offline and pins the exact code that is tested |
+| Tree mechanisms posed in JavaScript; only loops call the server | No HTTP round trip and Python solve per tick for most models. Play runs at frame rate |
+| One loop request in flight, newest values win | Dragging a slider fast does not queue up stale solves |
+| The loader reads our own manifest + GLB (not USDZ) | It is what step 2 exports; the manifest has frames, axes, limits, mimics and the articulation tree |
+| Compile signals in the viewer, click to jump to the pose, bodies in red | A finding such as "drawer hits cabinet at 260 mm" becomes something you can see |
+| Failed builds kept in `result/last_failed` with their signals | The model with the defect is the one you most need to look at |
+| Explicit MIME types | Windows registry mappings can break ES module loading |
+
+### Open ideas
+
+- **Contact markers:** draw the intersection volume (from the manifold check) at the signal
+  pose, not only the two bodies in red.
+- **Trajectory playback:** Play along a recorded path (study §13) instead of one joint at a
+  time.
+- **Version diff:** overlay two versions, or list the manifest changes between them.
+- **Live reload:** poll `/api/versions` so a new compile appears without a page reload. That
+  will matter when the agent loop (step 8) compiles in the background.
+- **Loops in the browser:** a small Gauss-Newton loop solver in JavaScript would remove the
+  server call for four-bars too. It needs the same walking warm start to stay on the branch.
+- **Screenshots for the agent:** headless render of the signal pose, if image feedback
+  (study §13) is added.
+
+### Step 5b: bodies rendered black (found in a browser)
+
+**Symptom.** Checked in a real browser: posing worked, but every body was solid black with no
+shading.
+
+**Cause.** The exported GLB has `POSITION` only, no `NORMAL` (trimesh's default). The page
+did give each body a `MeshStandardMaterial`, and there were lights, but a lit material with
+no normals cannot be shaded and renders black. The Node tests compared matrices, not
+pixels, so they could not see it.
+
+**Fix** (`viewer/static/display.js`, new, 80 lines; used by `app.js`):
+- **Normals.** If a mesh has none, `toCreasedNormals` (three.js `BufferGeometryUtils`,
+  already vendored) computes them with a 30° crease angle. Cylinders shade round, and
+  boxes keep flat faces and sharp edges. Normals already present in a GLB are kept.
+- **Colours.** A fixed 10-colour palette by body index (steel blue, orange, teal, green,
+  gold, purple, khaki, light blue, light green, grey). It has no reds or pinks:
+  red (`#e5383b`) is only the collision highlight.
+- **Material.** `MeshStandardMaterial`, roughness 0.6, metalness 0.
+- **Lights.** A hemisphere light (sky white, ground grey) plus a key and a fill
+  directional light, so faces at different angles get different shades.
+- **Outlines.** `EdgesGeometry` at 30°, drawn as thin dark lines (opacity 0.55) on each
+  body. A polygon offset on the faces keeps the lines from z-fighting.
+- **Legend.** Top right of the 3D view: body name → colour swatch. A highlighted body's
+  row turns red and bold.
+
+**Tests** (+2, under Node, for `four_bar` and `desk_lamp`). The real GLB is parsed with the
+vendored `GLTFLoader` and styled by `display.js`, as the page does it. The test then checks:
+- each body had no normals and now has unit normals (error below 1e-4) for every vertex;
+- the material is lit (`MeshStandardMaterial`);
+- each body has edge lines;
+- the colours follow the palette by body index;
+- highlighting turns a body red, and clearing it restores the body's own colour;
+- the palette is distinct, with no colour within 25° of red hue. This check caught the
+  first palette's brown (`#9c755f`, hue 22°), which is why the palette has khaki instead.
+
+The staging folder now maps both `three` and `three/addons/*` (the page imports
+`BufferGeometryUtils` as `three/addons/...`).
+
+**237 tests pass.**
+
+**Lesson.** Tests that compare numbers do not show what the page looks like. This bug was
+caught by looking at the page in a browser.
+
+**Open idea.** Write normals into the GLB at export, so other glTF viewers shade it too.
+The viewer would keep its fallback.

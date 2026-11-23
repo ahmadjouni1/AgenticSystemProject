@@ -25,8 +25,9 @@ uv sync
 uv run pytest -q
 ```
 
-The suite has 217 tests. It takes about 55 s, most of it in the compiler tests, which
-start real subprocesses.
+The suite has 237 tests. It takes about 70-100 s, most of it in the compiler tests, which
+start real subprocesses. The viewer's JavaScript tests run under Node.js if it is
+installed, and are skipped otherwise.
 
 Try the examples:
 
@@ -36,6 +37,13 @@ uv run python -m examples.gantry        # mimic joints
 uv run python scripts/measure_cold_start.py
 ```
 
+Open models in the viewer (a local page; three.js is vendored, so it works offline):
+
+```shell
+uv run python scripts/make_demo_runs.py   # compiles runs/four_bar, runs/drawer, runs/desk_lamp
+uv run python -m viewer runs/four_bar     # opens the browser; Ctrl+C to stop
+```
+
 ## What is here
 
 | Folder | What it holds |
@@ -43,6 +51,7 @@ uv run python scripts/measure_cold_start.py
 | `sdk/` | Bodies, frames, joints (fixed / revolute / prismatic, limits, mimic), assemblies with loop closures, forward kinematics, Articraft's most useful mesh helpers, and `export` (URDF + GLB + manifest) |
 | `compiler/` | Runs `workspace/main.py` in a fresh, killable process, validates it, runs its checks, exports it, and reports `<compile_signals>` |
 | `examples/` | 8 articulated objects: laptop, four-bar, gantry, toaster, door hinge, desk lamp, computer mouse, folding chair |
+| `viewer/` | `python -m viewer <run>`: a local web page with a version picker, joint sliders, Play, and compile signals shown at the pose where they happen |
 | `tests/` | pytest suite, with a small standalone URDF forward-kinematics reader |
 | `scripts/` | Benchmarks and the generator for `docs/SHAPE_HELPERS.md` |
 | `docs/` | The Articraft study and the ranked table of its shape helpers |
@@ -57,8 +66,8 @@ The steps follow the parts of the original listed in the study.
 | 2 | Export: URDF + GLB + OBJ + JSON manifest, versioned `result/vNNNN/` | Done |
 | 3 | Compiler: subprocess worker, Windows and POSIX process-tree kill, typed compile signals, cache, repeat detection | Done |
 | 4 | Checks: run_tests(ctx) API, mesh health, floating parts, overlap, swept collisions (revolute + prismatic, loops), separation, scale-relative tolerances, blocking policy | Done |
-| 5 | Viewer | Next |
-| 6 | LLM client | Planned |
+| 5 | Viewer: loader, local server, vendored three.js, tree FK in the browser, loop poses from the server, signal overlay | Done |
+| 6 | LLM client | Next |
 | 7 | Agent tools | Planned |
 | 8 | Agent loop | Planned |
 | 9 | Context and memory | Planned |

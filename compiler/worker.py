@@ -12,8 +12,9 @@ The phases are:
 4. run ``run_tests(ctx)`` if it is defined (``ctx`` is an ``sdk.testing.TestContext``:
    expectations and ``allow_*`` with reasons);
 5. baseline checks (``sdk.testing.run_checks``), using the allowances from ``ctx``;
-6. export to ``result/vNNNN`` with ``main.py`` as the source snapshot, but only if
-   nothing blocks.
+6. export to ``result/vNNNN`` with ``main.py`` as the source snapshot and the signals
+   in ``signals.json``, but only if nothing blocks. A valid model whose checks fail is
+   exported to ``result/last_failed`` instead (not a version), for the viewer.
 
 Prints ONE JSON payload as the last line of stdout. Anything main.py prints is captured
 into the payload instead.
@@ -36,6 +37,8 @@ import time
 _STARTED = time.perf_counter()
 PROGRESS_FILE = ".compile-progress.json"
 HANG_FILE = ".compile-hang.txt"
+SIGNALS_FILE = "signals.json"
+LAST_FAILED = "last_failed"
 
 
 def _arm_hang_dump(argv: list[str]) -> object | None:
@@ -59,6 +62,7 @@ import io  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import runpy  # noqa: E402
+import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -98,6 +102,7 @@ class Progress:
 def compile_workspace(run_dir: Path) -> dict[str, Any]:
     workspace, result_dir = run_dir / "workspace", run_dir / "result"
     main_path = workspace / "main.py"
+    shutil.rmtree(result_dir / LAST_FAILED, ignore_errors=True)  # describes the latest compile
     progress = Progress(result_dir / PROGRESS_FILE)
     out, err = io.StringIO(), io.StringIO()
     signals: list[CompileSignal] = []
@@ -159,14 +164,34 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
         report = run_checks(model, ctx)
     signals += feedback.signals_from_report(report, workspace)
     model_info["check_seconds"] = round(sum(report.timings.values()), 4)
+    signals_json = json.dumps([s.to_dict() for s in signals], indent=2)
     if any(s.severity == "failure" for s in signals):
+        _export_last_failed(model, result_dir, main_path, signals_json)
         return signals, None, model_info
     with progress.phase_named(feedback.EXPORT_PHASE):
-        result = export(model, result_dir, source=main_path)
+        result = export(model, result_dir, source=main_path,
+                        extra_files={SIGNALS_FILE: signals_json})
     export_info = {"version": result.version, "directory": str(result.directory),
                    "urdf": str(result.urdf), "glb": str(result.glb),
                    "manifest": str(result.manifest)}
     return signals, export_info, model_info
+
+
+def _export_last_failed(model: Any, result_dir: Path, main_path: Path, signals_json: str) -> None:
+    """Keep the model of a compile whose checks failed in ``result/last_failed`` (not a
+    version), so the viewer can show the problem at the pose where it happens."""
+    from sdk.export import export
+
+    build = result_dir / ".last_failed_build"
+    shutil.rmtree(build, ignore_errors=True)
+    try:
+        exported = export(model, build, version=0, source=main_path,
+                          extra_files={SIGNALS_FILE: signals_json})
+        os.replace(exported.directory, result_dir / LAST_FAILED)
+    except Exception:  # noqa: BLE001 - a preview is a convenience, never a new failure
+        pass
+    finally:
+        shutil.rmtree(build, ignore_errors=True)
 
 
 def _test_failures(outcome: object) -> list[str]:

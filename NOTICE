@@ -48,3 +48,10 @@ Articraft module):
 Everything else (export to URDF/GLB, mimic joints, the walking warm start, the
 Windows process-tree handling, the tests, and the examples) was written for this
 project.
+
+Third-party code distributed with this repository:
+
+- viewer/static/vendor/three/
+  three.js r170 (https://github.com/mrdoob/three.js): three.module.js, OrbitControls,
+  GLTFLoader and BufferGeometryUtils, unmodified. Copyright 2010-2024 three.js authors,
+  MIT license; the license text is in viewer/static/vendor/three/LICENSE.

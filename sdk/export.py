@@ -88,6 +88,7 @@ def export(
     density: float = DEFAULT_DENSITY,
     densities: Mapping[str, float] | None = None,
     collision_max_faces: int = COLLISION_MAX_FACES,
+    extra_files: Mapping[str, bytes | str] | None = None,
 ) -> ExportResult:
     """Validate ``assembly`` and write it to ``out_dir/vNNNN``.
 
@@ -95,6 +96,8 @@ def export(
     exists raises ``FileExistsError``. ``source`` is a file (later ``main.py``) that is
     copied next to the export and hashed into the manifest. ``density`` (kg/m^3) gives
     every body's mass from its volume, and ``densities`` overrides it per body.
+    ``extra_files`` ({name: content}) are written into the version folder before it is
+    renamed into place (the compiler adds its ``signals.json``).
     """
     art = assembly.validate()  # refuses an invalid assembly before anything is written
     root = Path(out_dir)
@@ -114,6 +117,11 @@ def export(
     try:
         _write_version(assembly, art, staging, number, source_path, density,
                        dict(densities or {}), collision_max_faces)
+        for name, content in (extra_files or {}).items():
+            if Path(name).name != name:
+                raise ValueError(f"extra file names must be plain file names, got {name!r}")
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            (staging / name).write_bytes(data)
         os.rename(staging, final)  # fails if another export took the number meanwhile
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

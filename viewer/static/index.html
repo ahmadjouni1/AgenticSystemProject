@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Replica viewer</title>
+  <style>
+    :root { --ink: #1f2933; --muted: #616e7c; --line: #d9dee4; --panel: #ffffff;
+            --red: #c62828; --amber: #a86400; --blue: #2a5bd7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100vh; display: flex; font: 14px/1.4 system-ui, sans-serif;
+           color: var(--ink); background: #f3f4f6; }
+    aside { width: 340px; min-width: 280px; height: 100vh; overflow-y: auto; padding: 16px;
+            background: var(--panel); border-right: 1px solid var(--line); }
+    main { flex: 1; position: relative; min-width: 0; }
+    canvas { width: 100%; height: 100%; display: block; }
+    h1 { font-size: 17px; margin: 0 0 10px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+         margin: 18px 0 6px; }
+    select, button { font: inherit; padding: 5px 8px; border: 1px solid var(--line);
+                     border-radius: 6px; background: #fff; }
+    select { width: 100%; }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--blue); }
+    .muted { color: var(--muted); font-size: 12px; margin: 6px 0; }
+    .slider { display: grid; grid-template-columns: 1fr; margin: 8px 0; }
+    .slider span:first-child { font-family: ui-monospace, monospace; font-size: 12px; }
+    .slider input { width: 100%; }
+    .slider .value { font-size: 12px; color: var(--muted); text-align: right; }
+    .buttons { display: flex; gap: 8px; margin-top: 8px; }
+    #status { position: absolute; left: 12px; right: 12px; bottom: 12px; padding: 8px 10px;
+              border-radius: 6px; background: rgba(255, 255, 255, .92); }
+    #status:empty { display: none; }
+    #status.error { color: var(--red); border: 1px solid #f2b8b5; }
+    #signals { list-style: none; padding: 0; margin: 0; }
+    .signal { border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px;
+              padding: 6px 8px; margin: 6px 0; font-size: 12.5px; }
+    .signal .head { font-weight: 600; font-size: 11.5px; text-transform: uppercase;
+                    letter-spacing: .04em; margin-bottom: 2px; }
+    .signal.failure { border-left-color: var(--red); }
+    .signal.warning { border-left-color: var(--amber); }
+    .signal.note { border-left-color: var(--blue); }
+    .signal.clickable { cursor: pointer; }
+    .signal.clickable:hover, .signal.active { background: #f5f7fb; }
+    #legend { position: absolute; top: 12px; right: 12px; margin: 0; padding: 8px 10px;
+              list-style: none; max-height: 60%; overflow-y: auto; font-size: 12px;
+              background: rgba(255, 255, 255, .92); border: 1px solid var(--line);
+              border-radius: 6px; }
+    #legend:empty { display: none; }
+    #legend li { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+    #legend .swatch { width: 12px; height: 12px; border-radius: 3px;
+                      border: 1px solid rgba(0, 0, 0, .35); flex: none; }
+    #legend li.hit { color: var(--red); font-weight: 600; }
+    #legend li.hit .swatch { background: #e5383b !important; }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "/static/vendor/three/three.module.js",
+                   "three/addons/": "/static/vendor/three/addons/" } }
+  </script>
+</head>
+<body>
+  <aside>
+    <h1 id="title">Replica viewer</h1>
+    <select id="versions" aria-label="Version"></select>
+    <p id="mode" class="muted"></p>
+
+    <h2>Joints</h2>
+    <div id="sliders"></div>
+    <p id="mimics" class="muted"></p>
+    <div class="buttons">
+      <button id="play">Play</button>
+      <button id="reset">Rest pose</button>
+    </div>
+
+    <h2>Compile signals (<span id="signal-count">none</span>)</h2>
+    <p class="muted">Click a signal to see the pose where it happens; the bodies involved turn red.</p>
+    <ul id="signals"></ul>
+  </aside>
+  <main>
+    <canvas id="view"></canvas>
+    <ul id="legend" aria-label="Body colours"></ul>
+    <div id="status"></div>
+  </main>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

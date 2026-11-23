@@ -511,6 +511,30 @@ def run_checks(model, ctx: TestContext | None = None,
     return CheckReport(findings, list(ctx.allowances), timings, size, tolerances)
 
 
+def drivable_joints(model) -> tuple[dict[str, Joint], dict[str, str]]:
+    """The joints a person (or a sweep) drives: movable tree joints that are not mimics.
+    Of the joints on a loop, only the first one authored drives it; the solver moves the
+    rest. Returns (drivers by name, loop member name -> its driver's name)."""
+    art = model.validate()
+    by_name = {j.name: j for j in model.joints}
+    order = [j.name for j in model.joints]
+    loop_members: dict[str, str] = {}
+    for closure in art.closures:
+        sources: list[Joint] = []
+        for joint in loop_path(art, closure):
+            while joint.mimic is not None:
+                joint = by_name[joint.mimic.source]
+            if joint.movable and joint not in sources:
+                sources.append(joint)
+        sources.sort(key=lambda j: order.index(j.name))
+        for joint in sources:
+            loop_members.setdefault(joint.name, sources[0].name)
+    drivers = {joint.name: joint for joint in art.tree
+               if joint.movable and joint.mimic is None
+               and loop_members.get(joint.name, joint.name) == joint.name}
+    return drivers, loop_members
+
+
 def _joint_range(joint: Joint, config: CheckConfig, size: float) -> tuple[float, float]:
     if joint.limits is not None:
         return joint.limits
@@ -688,30 +712,7 @@ class _Checker:
     # -- sweeps --
 
     def _drivers(self) -> dict[str, Joint]:
-        """Joints to sweep: drivable tree joints. Of the joints on each loop, only the
-        first-authored one drives it; mimics follow their source."""
-        art = self.model.validate()
-        by_name = {j.name: j for j in self.model.joints}
-        loop_members: dict[str, str] = {}  # joint -> the loop driver
-        order = [j.name for j in self.model.joints]
-        for closure in art.closures:
-            sources = []
-            for joint in loop_path(art, closure):
-                while joint.mimic is not None:
-                    joint = by_name[joint.mimic.source]
-                if joint.movable and joint not in sources:
-                    sources.append(joint)
-            sources.sort(key=lambda j: order.index(j.name))
-            for joint in sources:
-                loop_members.setdefault(joint.name, sources[0].name)
-        drivers = {}
-        for joint in art.tree:
-            if not joint.movable or joint.mimic is not None:
-                continue
-            if loop_members.get(joint.name, joint.name) != joint.name:
-                continue
-            drivers[joint.name] = joint
-        self.loop_driver = loop_members
+        drivers, self.loop_driver = drivable_joints(self.model)
         return drivers
 
     def sweeps(self) -> list[Finding]:

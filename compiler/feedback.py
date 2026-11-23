@@ -67,6 +67,15 @@ class CompileSignal:
     source: str | None = None
     """The text of that line, stripped."""
     severity: str = "failure"
+    bodies: tuple[str, ...] = ()
+    """For check findings: the bodies involved (the viewer highlights them)."""
+    pose: dict[str, float] | None = None
+    """For check findings: joint values where it happens (the viewer jumps there)."""
+    amount: float | None = None
+    """For check findings: meters of penetration, gap or gap growth."""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bodies", tuple(self.bodies))
 
     @property
     def location(self) -> str | None:
@@ -226,7 +235,8 @@ def signals_from_report(report: object, workspace: Path) -> list[CompileSignal]:
         else:
             severity = "warning"
         signals.append(CompileSignal(signal.kind, signal.message, signal.hint, signal.file,
-                                     signal.line, signal.source, severity))
+                                     signal.line, signal.source, severity, finding.bodies,
+                                     finding.pose, finding.amount))
     return signals
 
 _VALIDATION_HINTS = (

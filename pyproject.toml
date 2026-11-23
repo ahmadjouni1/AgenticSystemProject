@@ -2,6 +2,7 @@
 name = "replica"
 version = "0.1.0"
 description = "Articraft rebuilt from scratch, one step at a time."
+license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",

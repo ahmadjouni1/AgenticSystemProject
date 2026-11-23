@@ -77,7 +77,11 @@ This project is inspired by **Articraft**:
 [github.com/mattzh72/articraft](https://github.com/mattzh72/articraft), and its
 research paper, [arXiv:2605.15187](https://arxiv.org/abs/2605.15187).
 
-It includes code adapted from Articraft, which is licensed under the
-[Apache License 2.0](LICENSES/Apache-2.0.txt). The adapted portions stay under that
-license, and every file that contains them says so at the top. [NOTICE](NOTICE) lists
-what was adapted, file by file.
+It includes code adapted from Articraft, which is licensed under the Apache License 2.0.
+Every file that contains adapted code says so at the top. [NOTICE](NOTICE) lists what was
+adapted, file by file.
+
+## License
+
+[Apache License 2.0](LICENSE) for the whole repository. See [NOTICE](NOTICE) for
+attribution.

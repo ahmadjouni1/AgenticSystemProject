@@ -6,10 +6,10 @@ This project is inspired by, and includes code adapted from, Articraft:
   https://github.com/mattzh72/articraft
   Paper: https://arxiv.org/abs/2605.15187
 
-Articraft is licensed under the Apache License, Version 2.0. A copy of that license
-is included in LICENSES/Apache-2.0.txt. The adapted portions remain under the Apache
-License 2.0. Files that contain adapted material carry a notice at the top
-("Portions adapted from Articraft ... and modified for this replica").
+Articraft is licensed under the Apache License, Version 2.0. This repository, including
+the adapted portions, is also licensed under the Apache License 2.0; the full text is in
+LICENSE. Files that contain adapted material carry a notice at the top ("Portions adapted
+from Articraft ... and modified for this replica").
 
 What was adapted, file by file (all were modified; none is a verbatim copy of a whole
 Articraft module):

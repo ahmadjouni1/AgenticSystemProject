@@ -51,6 +51,13 @@ Articraft module):
   edit with old_text/new_text that must match once, all or nothing; write; compile
   returning the signal block, from articraft/agent/tools/*. Rewritten; render, probe,
   structured errors and the output cap are new, and the shell tool was dropped.
+- agent/loop.py, prompts/system.md
+  The loop design: query, run tool calls, append results; success only for a text reply
+  with no tool calls after a compile of the current workspace digest; the
+  <compile_required> / <final_response_required> reminders; three empty replies end the
+  run; conversation.jsonl and a run record, from articraft/agent/harness.py. Rewritten;
+  the blocking-check requirement, end states, budgets, best build and per-turn metrics
+  are new. The prompts were written for this project.
 - docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
   A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
   source for commentary, and an inventory of its mesh helpers.

@@ -45,11 +45,12 @@ class Role:
     effort: str | None = None  # reasoning_effort; None: the provider's default
     max_output_tokens: int = 32_000  # reasoning tokens count against this too
     timeout_s: float = 300.0  # per HTTP attempt
+    images: bool = False  # does the model accept image inputs here (Chat Completions)?
 
 
 # OpenAI's docs: "If you're not sure where to start, use GPT-6.2 Astra, our flagship model
 # for complex reasoning and coding." Kept for evaluation runs.
-OPENAI_STRONG = Role("openai", "gpt-6.2-astra")
+OPENAI_STRONG = Role("openai", "gpt-6.2-astra", images=True)  # model page: image_input
 # DeepSeek's pricing page lists two models: deepseek-v4-pro (served by DeepSeek-V4-Pro) and
 # deepseek-flash ("Use deepseek-flash as the model name"; served by DeepSeek-V4.1-Flash).
 DEEPSEEK_PRO = Role("deepseek", "deepseek-v4-pro")

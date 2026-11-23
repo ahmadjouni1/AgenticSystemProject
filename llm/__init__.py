@@ -35,7 +35,8 @@ def get_model(role: str, *, run_dir: str | Path | None = None,
     return OpenAIChatModel(
         config.PROVIDERS[choice.provider], choice.model, effort=choice.effort,
         max_output_tokens=choice.max_output_tokens, timeout_s=choice.timeout_s,
-        budget=budget, log=CallLog(run_dir) if run_dir is not None else None, role=role)
+        budget=budget, log=CallLog(run_dir) if run_dir is not None else None, role=role,
+        supports_images=choice.images)
 
 
 __all__ = ["UNKNOWN", "Assistant", "Budget", "BudgetExceeded", "CallLog", "LLMError", "Message",

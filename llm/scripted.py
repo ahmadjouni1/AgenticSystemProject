@@ -6,7 +6,7 @@
     ])
 
 A reply is a string (text only) or a dict with ``text``, ``tool_calls`` (``name``,
-``arguments``, optional ``id``), ``usage`` (Usage fields), ``reasoning`` and
+``arguments`` or ``raw_arguments`` (a string, sent as is), optional ``id``), ``usage`` (Usage fields), ``reasoning`` and
 ``finish_reason``. Every request is kept in ``model.requests``. Budget and call log work as
 for a real model; the cost uses config.PRICES if ``model`` names a priced model, else $0
 (nothing is billed).
@@ -30,8 +30,9 @@ class ScriptedModel(ChatModelBase):
 
     def __init__(self, replies: list[str | dict[str, Any]], model: str = "scripted", *,
                  budget: Budget | None = None, log: CallLog | None = None,
-                 role: str | None = None):
+                 role: str | None = None, supports_images: bool = False):
         super().__init__(model, budget=budget, log=log, role=role)
+        self.supports_images = supports_images
         self.replies = list(replies)
         self.requests: list[tuple[list[Message], tuple[Tool, ...]]] = []
         self._ids = 0
@@ -48,9 +49,12 @@ class ScriptedModel(ChatModelBase):
         calls = []
         for call in spec.get("tool_calls", []):
             self._ids += 1
+            call_id = call.get("id", f"call_{self._ids}")
+            if "raw_arguments" in call:  # exactly as a model sent it (maybe broken JSON)
+                calls.append(ToolCall.parse(call_id, call["name"], call["raw_arguments"]))
+                continue
             arguments = call.get("arguments", {})
-            calls.append(ToolCall(call.get("id", f"call_{self._ids}"), call["name"], arguments,
-                                  json.dumps(arguments)))
+            calls.append(ToolCall(call_id, call["name"], arguments, json.dumps(arguments)))
         known = [t.name for t in tools]
         for call in calls:
             if call.name not in known:

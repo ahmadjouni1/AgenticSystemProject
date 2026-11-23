@@ -54,6 +54,7 @@ def redact(text: str, secrets: tuple[str, ...] = ()) -> str:
 
 class ChatModelBase:
     provider = "base"
+    supports_images = False
 
     def __init__(self, model: str, *, budget: Budget | None = None, log: CallLog | None = None,
                  role: str | None = None):

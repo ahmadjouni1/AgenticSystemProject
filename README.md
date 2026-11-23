@@ -25,7 +25,7 @@ uv sync
 uv run pytest -q
 ```
 
-The suite has 301 tests, none of which use the network. It takes about 90 s, most of it in the compiler tests, which
+The suite has 320 tests, none of which use the network. It takes about 90 s, most of it in the compiler tests, which
 start real subprocesses. The viewer's JavaScript tests run under Node.js if it is
 installed, and are skipped otherwise.
 
@@ -54,6 +54,14 @@ uv run python scripts/llm_smoke.py
 Keys are read only from those environment variables, or from `replica/.env` for any that
 are not set (git-ignored; `NAME=value` lines). They are never logged.
 
+Run the agent on a prompt (DeepSeek by default, $1 and 100 calls per run; keys from the
+environment or `replica/.env`):
+
+```shell
+uv run python -m agent "a drawer that slides out of a cabinet"
+uv run python -m viewer runs/<the run folder it prints>
+```
+
 Call the agent's tools by hand (write, compile, render, probe) on the laptop and the drawer:
 
 ```shell
@@ -69,7 +77,8 @@ uv run python scripts/tools_demo.py
 | `examples/` | 8 articulated objects: laptop, four-bar, gantry, toaster, door hinge, desk lamp, computer mouse, folding chair |
 | `viewer/` | `python -m viewer <run>`: a local web page with a version picker, joint sliders, Play, and compile signals shown at the pose where they happen |
 | `llm/` | The LLM client: one `query(messages, tools) -> Reply` protocol, OpenAI and DeepSeek via the `openai` package, usage and cost per call, per-run budget, retries, a call log, and `ScriptedModel` for tests. Roles and prices are in `llm/config.py` |
-| `agent/` | The agent's tools: `read`, `write`, `edit`, `compile`, `render` (CPU PNG views), `probe` (positions, gaps, collisions at a pose). Structured errors, workspace-only paths, no shell |
+| `prompts/` | The system prompt, and the starter `main.py` for each run |
+| `agent/` | The agent loop (`python -m agent`: turns, stop rule, end states, run folder with `record.json`) and its tools: `read`, `write`, `edit`, `compile`, `render` (CPU PNG views), `probe` (positions, gaps, collisions at a pose). Structured errors, workspace-only paths, no shell |
 | `tests/` | pytest suite, with a small standalone URDF forward-kinematics reader |
 | `scripts/` | Benchmarks and the generator for `docs/SHAPE_HELPERS.md` |
 | `docs/` | The Articraft study and the ranked table of its shape helpers |
@@ -87,8 +96,8 @@ The steps follow the parts of the original listed in the study.
 | 5 | Viewer: loader, local server, vendored three.js, tree FK in the browser, loop poses from the server, signal overlay | Done |
 | 6 | LLM client: neutral messages, OpenAI + DeepSeek, usage, cost (price table dated), budget caps, retries, prompt-cache-friendly prefix, call log, ScriptedModel | Done |
 | 7 | Agent tools: read, write, edit, compile, render, probe; structured errors; path scoping; output cap; fixed schema order | Done |
-| 8 | Agent loop | Next |
-| 9 | Context and memory | Planned |
+| 8 | Agent loop: prompts v0, stop rule (fresh passing compile), end states, best build, run folder with conversation and per-turn record, CLI | Done |
+| 9 | Context and memory | Next |
 | 10 | System prompt and SDK docs | Planned |
 | 11 | Run storage | Planned |
 | 12 | Evaluation | Planned |

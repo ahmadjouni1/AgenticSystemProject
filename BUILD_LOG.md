@@ -1338,6 +1338,27 @@ cleanly). Two things only a real call can confirm:
 
 The smoke script exercises the first point. Its `--cache` option exercises caching.
 
+### Live smoke test (run by the user, 2026-11-23)
+
+`scripts/llm_smoke.py`, with the user's keys from `replica/.env`. Log:
+`runs/llm_smoke/20261123-165312/llm_calls.jsonl`.
+
+| Provider / model | Result | Tokens (in / cached / out / reasoning) | Cost |
+| --- | --- | --- | --- |
+| deepseek / deepseek-v4-pro, tool call | OK: called `add(2, 3)` | 394 / 0 / 95 / 36 | $0.000448 |
+| deepseek, answer after the tool result | OK: "5"; `reasoning_content` echoed and accepted | 502 / 384 / 17 / 8 | $0.000120 |
+| deepseek, `--cache`, 1st long prompt | OK | 3,112 / 0 / 16 / 13 | $0.002086 |
+| deepseek, `--cache`, 2nd long prompt | OK: **98.7% cached** | 3,112 / 3,072 / 21 / 18 | $0.000136 |
+| openai / gpt-6.2-astra | **HTTP 400**: "Function tools with reasoning_effort are not supported for gpt-6.2-astra in /v1/chat/completions ... use /v1/responses" | - | $0 (logged as error) |
+
+The DeepSeek costs are off-peak rates (16:53 UTC on a Monday). Both points that step 6 could
+not verify offline now are:
+- the reasoning echo in a tool loop works;
+- DeepSeek reports cached tokens as expected.
+
+OpenAI with tools needs the Responses API: a required item in the open ideas below. It is
+not fixed now, as instructed.
+
 ### How Articraft does it (study §6)
 
 - **Files:** `agent/protocols.py` (`Model.query`) and `agent/provider/` (OpenAI, Anthropic,
@@ -1363,9 +1384,10 @@ The smoke script exercises the first point. Its `--cache` option exercises cachi
 
 ### Open ideas
 
-- **Responses API for OpenAI:** `previous_response_id` would send only new items each turn
-  (Articraft does this). It would mean a second converter, so wait until the agent loop
-  shows the cost of resending.
+- **REQUIRED before any OpenAI evaluation: an OpenAI Responses API adapter** behind the same
+  `Model.query` protocol. The live smoke test (below) showed that gpt-6.2-astra refuses
+  function tools with reasoning on `/v1/chat/completions`. The adapter would also bring
+  `previous_response_id`, which sends only new items each turn, as Articraft does.
 - **`prompt_cache_key`:** OpenAI routes requests with the same key to the same cache. Check
   its docs before using it.
 - **Strict tool schemas:** DeepSeek's beta `strict` mode (at `/beta`) and OpenAI Structured
@@ -1656,3 +1678,220 @@ Example probe result (four-bar, crank 60°):
   4-characters-per-token estimate.
 - **Parallel execution:** the loop (step 8) can run consecutive `read` calls concurrently.
   Probe and render share a cached scene, so they stay sequential.
+
+## Step 8: Agent loop
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `prompts/system.md` | 68 | System prompt v0 (4,356 chars, about 1.1k tokens): role, the four quality rules, the workflow, the `main.py` contract, tool tips |
+| `docs/sdk/quickstart.md` | 104 | SDK quickstart v0 (5,039 chars, about 1.3k tokens): building blocks, joints and limit rules, loops, a complete laptop example, what the compiler checks |
+| `prompts/main_template.py` | 18 | Starter `workspace/main.py`: imports, comments for bodies and joints, `object_model`, an empty `run_tests` |
+| `agent/loop.py` | 447 | `run(prompt, model, budget, max_turns=60) -> RunResult`: turns, the stop rule, end states, the run folder, `record.json` |
+| `agent/__main__.py` | 86 | `python -m agent "<prompt>"`: one progress line per turn, the run folder at the end |
+| `llm/messages.py`, `llm/config.py`, `llm/openai_chat.py`, `llm/scripted.py` | (changed) | `User(content, images)`; `Role.images` / `supports_images`; `ScriptedModel` `raw_arguments` |
+| `tests/test_agent_loop.py` | 326 | 19 tests: ScriptedModel or a fake transport, the real compiler, no network |
+
+The quickstart's laptop example is compiled by the tests: it is the "good `main.py`" of the
+loop tests, so the docs cannot drift from the SDK.
+
+**The loop.**
+
+```python
+budget = Budget(max_cost_usd=1.0, max_calls=100)
+model = get_model("builder", run_dir=run_dir, budget=budget)
+result = run("a laptop that opens and closes", model, budget, run_dir=run_dir)
+result.status, result.reason, result.best, result.record
+```
+
+- **Messages:** `[System(system.md), System(quickstart.md), User(task)]`. Both system
+  messages plus the tool schemas are the stable, cached prefix. The task message asks the
+  model to plan bodies and joints first.
+- **Each turn:**
+  1. `model.query(messages, tools)`; the budget is checked inside;
+  2. the reply is appended;
+  3. its tool calls run in order, with consecutive `parallel_ok` calls (reads) on a
+     4-thread pool, their results kept in order;
+  4. the results are appended.
+- **Images:** for a model whose role has `images=True`, rendered PNGs are added after the
+  tool results as one `User` message with image parts (data URLs). That is gpt-6.2-astra
+  only; DeepSeek is off, so it relies on the bounding-box summary.
+- **Malformed tool arguments** come back as a `bad_arguments` tool error without running.
+  If the reply was cut at the output limit (`finish_reason=length`), they come back as
+  `reply_cut_off`, whose hint says to reason less and write large files in parts.
+
+**Stop rule** (Articraft's freshness gate, plus our blocking checks). Success needs all
+three:
+- a reply with text and no tool calls;
+- the latest compile passed every blocking check;
+- `workspace_digest(workspace)` still equals that compile's digest.
+
+Otherwise one reminder is added as a user message, and the loop goes on:
+- `<compile_required>`, with the reason: "you have not compiled yet", "the latest compile
+  failed (swept_collision: ...)", or "the workspace changed after the last compile";
+- `<final_response_required>`, for an empty reply after a fresh passing compile.
+
+**End states.** Every non-success reason ends with the best build: the latest `vNNNN`
+(passed), else `result/last_failed` (built, failed its checks), else "no build was
+produced".
+
+| Status | When |
+| --- | --- |
+| `success` | the stop rule above |
+| `failed_checks` | 3 finishes in a row refused while the latest compile failed |
+| `budget_exceeded` | `BudgetExceeded` from the model: the call cap before a call, or the cost cap after the call that crossed it (that reply is kept in the conversation) |
+| `max_turns` | 60 turns by default |
+| `no_progress` | 3 empty replies in a row; or 5 compile failures in a row with the same failure signature (cached recompiles count); or 3 refused finishes with no failing build to blame |
+| `error` | a model call failed after retries (`LLMError`), or a loop bug (traceback kept in `reason`) |
+
+**Run folder** `runs/<UTC timestamp>-<slug>/`:
+- `workspace/` (the starter `main.py` is copied in), `result/`, `renders/`;
+- `llm_calls.jsonl` (step 6);
+- `conversation.jsonl`: every message with its turn and time, including system prompts,
+  tool calls with their exact argument strings, tool results, reminders and reasoning;
+- `record.json`, rewritten atomically (temp file + rename) after every turn.
+
+`record.json` holds:
+- status, reason, prompt, model, start, updated, duration, turns;
+- compiles (calls / passed / failed / cached / last status / last version);
+- tool call counts, token totals, cost, the budget state;
+- best build, final text;
+- **`per_turn`**: context size estimate, input / cached / output / reasoning tokens,
+  cached share, cost, latency, tools, compile result, reminder.
+
+The context estimate counts what the request actually sends, at about 4 characters per
+token: messages, the tool schemas, and the reasoning DeepSeek gets back.
+
+**CLI.**
+
+```
+uv run python -m agent "a drawer that slides out of a cabinet" [--role builder|cheap]
+                       [--max-turns 60] [--max-cost 1.0] [--max-calls 100] [--runs runs]
+
+turn   9  compile  -> compile success v0000  | ctx~7.7k tok, cached 100%, $0.0467
+success: finished after a passing, fresh compile
+view it: uv run python -m viewer runs/20261123-170310-a-drawer-that-slides-out-of-a-cabinet
+```
+
+### Tests (19, no network)
+
+- **Clean success:** write, compile, final text. Checked:
+  - the record fields and the compile counts;
+  - `per_turn` growing turn by turn;
+  - the first request is `[System, System, User]` with the tools in registry order;
+  - the conversation roles in order;
+  - the run folder layout.
+- **Compile failure, then a fix, then success:** limits `(0.5, 1.0)` give "must contain 0";
+  an edit fixes it; the second compile passes.
+- **Final text without compiling:** a `<compile_required>` reminder ("you have not compiled
+  yet"), then success.
+- **An edit after a good compile:** the finish is refused ("the workspace changed after the
+  last compile"); a recompile, then success.
+- **An empty reply after a passing compile:** `<final_response_required>`.
+- **Call cap:** `budget_exceeded` with best build `v0000`, and `record.json` says so.
+- **Cost cap:** a priced scripted model (deepseek-v4-pro) crosses $0.01; the paid reply is
+  kept; "no build was produced".
+- **5 identical failures** (the drawer fixture, compiled 6 times; 4 are cached): `no_progress`
+  after the 5th, best build `result/last_failed`.
+- **Finishing over failed checks**, 3 times: `failed_checks`.
+- **Other end states:** 3 empty replies give `no_progress`; `max_turns`; a model error gives
+  `error` with the record written.
+- **Tool execution:**
+  - three consecutive reads run in parallel and keep their order;
+  - images attached only when `supports_images`;
+  - broken JSON arguments come back as structured `bad_arguments`;
+  - a cut-off reply comes back as `reply_cut_off`.
+- **DeepSeek reasoning across a tool loop** (`OpenAIChatModel` with a fake transport):
+  - request 2 carries `reasoning_content` "plan", and request 3 carries "plan" and "check";
+  - the first 3 messages and the tool schemas are identical in every request;
+  - the token totals and the cached share are in the record;
+  - the context estimate includes the echoed reasoning.
+- **CLI:** the progress lines, the success line, the viewer hint, and the run folder name.
+
+**319 tests pass, 1 skipped.**
+
+### Live runs (DeepSeek, builder = deepseek-v4-pro, $1 cap each, 2026-11-23 ~17:03 UTC, off-peak)
+
+| Prompt | Status | Turns | Compiles (pass / fail) | Tokens in / cached / out (reasoning) | Cost | Time |
+| --- | --- | --- | --- | --- | --- | --- |
+| a laptop that opens and closes | success | 5 | 1 / 0 | 36,495 / 31,616 (87%) / 5,135 (4,109) | $0.0141 | 62 s |
+| a drawer that slides out of a cabinet | success | 12 | 1 / 2 | 220,524 / 212,352 (96%) / 20,841 (17,588) | $0.0513 | 253 s |
+| a four-bar linkage | success | 9 | 1 / 0 | 246,274 / 230,656 (94%) / 35,597 (32,603) | $0.0859 | 403 s |
+| **all three** | 3 / 3 | 26 | 3 / 2 | 503,293 / 474,624 (94%) / 61,573 | **$0.151** | 12 min |
+
+What happened:
+- **Laptop.** One write, one compile, two renders and a probe, then a correct summary.
+  **This run is not evidence of skill:** its `main.py` is 94% identical to the quickstart's
+  laptop example (difflib ratio 0.94). Evaluation prompts must not match the docs example
+  (step 12).
+- **Drawer.** A 2-body cabinet and drawer, a prismatic slide 0-300 mm, a knob. Two failed
+  compiles:
+  - `AttributeError: 'Box' object has no attribute 'translate'`. The quickstart was
+    ambiguous: it said "mesh geometries can be moved first: `.translate`". Fixed: it now
+    says `Box`/`Cylinder`/`Sphere` are placed with `xyz`/`rpy`, and only mesh geometries
+    have `.translate`;
+  - `[floating] drawer ... 2.00 mm from cabinet`: the drawer did not touch its cabinet. The
+    model closed the gap.
+- **Four-bar.** Ground, crank, coupler, rocker. `pin` is a loop closure, and the crank is
+  limited to ±π. It compiled first time, then 4 probe calls and 3 renders checked the
+  motion.
+  - **Turn 3 was cut off:** 31,646 reasoning tokens in 361 s reached the 32,000-token
+    output cap, and the `write` arguments were truncated. The tool error then was a
+    confusing "not valid JSON". The model recovered by writing again.
+  - **Fixes:** a `reply_cut_off` error with an actionable hint, and a test.
+- **The reasoning echo grows the context.** DeepSeek's thinking mode needs the reasoning of
+  the current tool loop sent back. An agent run has no new user message, so the whole run
+  is one loop.
+  - In the four-bar run, the 31.6k reasoning tokens of turn 3 were re-sent on every later
+    turn: input went from 4.3k to 36k tokens.
+  - The cache made it cheap (98-100% cached), but it is the largest cost in context.
+  - The old context estimate ignored it; it now counts it. This is step 9's first target.
+- **Wasted reads.** The drawer and four-bar runs spent 2-3 turns reading `docs/sdk/README.md`
+  and `docs/sdk/quickstart.md`, which are already in the context. Step 10: say so in the
+  prompt.
+
+The three fixes (the cut-off hint, the honest context estimate, the quickstart wording) came
+after these runs.
+
+### How Articraft does it (study §8)
+
+- **File:** `agent/harness.py` (`Agent._run_created`, `_run_tool_calls`, reminders).
+- **Turns:** up to 100. Each turn: compact if needed, query, append to memory and to
+  `conversation.jsonl`, run the tool calls.
+- **Success:** visible text with no tool calls, and a workspace SHA-256 equal to the last
+  successful compile's. Otherwise a `<compile_required>` or `<final_response_required>`
+  reminder.
+- **Endings:** 3 empty replies end the run. There are no loop-level retries; a failed query
+  ends with `status=error`.
+- **No budgets:** no cost, time or repair budget.
+- **"Compiled" is not "good":** its diagnostics never block, so a passing compile can still
+  have overlaps or floating parts.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| Success also needs the latest compile to pass the blocking checks (step 4), not only to have compiled | Otherwise "done" can mean a door through its frame |
+| Explicit end states: `failed_checks`, `budget_exceeded`, `no_progress` (identical failures, refused finishes, empty replies) | A run that cannot converge stops early, and the record says why |
+| The best build is always named: last passed, else last failed | A stopped run still leaves something to look at and to repair |
+| Per-run cost and call budget (step 6) enforced in the loop | Articraft has none |
+| `record.json` with per-turn context size, cached share and cost | Step 9 needs numbers to cut tokens |
+| Consecutive reads run in parallel; images only for models that accept them | Speed; text-only models still get the bounding boxes |
+| A reply cut off at the output limit is named as such | A truncated tool call otherwise looks like a JSON bug |
+
+### Open ideas
+
+- **Step 9 (context):**
+  - drop or summarize old reasoning (the run is one long tool loop);
+  - cut stale tool results (old file reads, superseded compile signals);
+  - lower `reasoning_effort` for routine turns.
+- **Step 10 (prompts):**
+  - tell the model the quickstart is already in its context;
+  - a stricter plan-first step;
+  - a different quickstart example from any evaluation prompt.
+- **Time budget:** the four-bar spent 361 s on one reply. A per-run wall-clock cap would
+  bound runs.
+- **Repair stages:** explicit plan → build → check → fix stages (study §8 idea). Today the
+  prompt asks for them, but the loop does not enforce them.
+- **REQUIRED before any OpenAI evaluation:** the Responses API adapter (see step 6).

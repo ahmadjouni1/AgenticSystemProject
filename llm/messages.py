@@ -5,7 +5,7 @@ A conversation is a list of messages, in order:
 | Message | Fields | Meaning |
 | --- | --- | --- |
 | ``System(content)`` | text | Instructions. Only at the start, so the prefix stays stable and cacheable |
-| ``User(content)`` | text | A user turn (the task, compile feedback, ...) |
+| ``User(content, images)`` | text, optional PNG paths | A user turn (the task, a reminder, ...). ``images`` become image parts (data URLs); the agent loop adds them only for models that accept images |
 | ``Assistant(content, tool_calls, reasoning)`` | text, ``[ToolCall]``, optional text | A model turn. ``reasoning`` is the provider's visible reasoning (DeepSeek's ``reasoning_content``), kept so it can be sent back when the provider needs it |
 | ``ToolResult(call_id, name, content, is_error)`` | the id of the call it answers, the tool name, text | The result of one tool call. ``is_error`` is for our own bookkeeping: Chat Completions has no such field, so ``content`` must say what failed |
 
@@ -44,6 +44,10 @@ class System:
 @dataclass(frozen=True)
 class User:
     content: str
+    images: tuple[str, ...] = ()  # PNG paths; sent only to models that accept images
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "images", tuple(str(i) for i in self.images))
 
 
 @dataclass(frozen=True)
@@ -154,7 +158,13 @@ def to_chat(messages: list[Message], reasoning: ReasoningEcho = "never") -> list
         if isinstance(message, System):
             chat.append({"role": "system", "content": message.content})
         elif isinstance(message, User):
-            chat.append({"role": "user", "content": message.content})
+            if message.images:
+                chat.append({"role": "user", "content": [
+                    {"type": "text", "text": message.content},
+                    *({"type": "image_url", "image_url": {"url": _data_url(path)}}
+                      for path in message.images)]})
+            else:
+                chat.append({"role": "user", "content": message.content})
         elif isinstance(message, ToolResult):
             chat.append({"role": "tool", "tool_call_id": message.call_id,
                          "content": message.content})
@@ -169,6 +179,13 @@ def to_chat(messages: list[Message], reasoning: ReasoningEcho = "never") -> list
                 item["reasoning_content"] = message.reasoning
             chat.append(item)
     return chat
+
+
+def _data_url(path: str) -> str:
+    import base64
+    from pathlib import Path
+
+    return "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
 def assistant_from_chat(message: dict[str, Any]) -> Assistant:
@@ -187,7 +204,11 @@ def from_chat(chat: list[dict[str, Any]]) -> list[Message]:
         if role in ("system", "developer"):
             messages.append(System(item["content"]))
         elif role == "user":
-            messages.append(User(item["content"]))
+            content = item["content"]
+            if isinstance(content, list):  # image parts are not turned back into paths
+                content = "".join(part.get("text", "") for part in content
+                                  if part.get("type") == "text")
+            messages.append(User(content))
         elif role == "assistant":
             assistant = assistant_from_chat(item)
             names.update({c.id: c.name for c in assistant.tool_calls})

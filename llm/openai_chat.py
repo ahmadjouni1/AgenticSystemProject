@@ -94,9 +94,10 @@ class OpenAIChatModel(ChatModelBase):
                  sleep: Callable[[float], None] = time.sleep,
                  jitter: Callable[[], float] = random.random,
                  budget: Budget | None = None, log: CallLog | None = None,
-                 role: str | None = None):
+                 role: str | None = None, supports_images: bool = False):
         super().__init__(model, budget=budget, log=log, role=role)
         self.provider = provider.name
+        self.supports_images = supports_images
         self.settings = provider
         self.effort, self.max_output_tokens, self.timeout_s = effort, max_output_tokens, timeout_s
         self.retry, self._sleep, self._jitter = retry, sleep, jitter

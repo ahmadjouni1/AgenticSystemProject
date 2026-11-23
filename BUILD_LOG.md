@@ -1078,3 +1078,299 @@ caught by looking at the page in a browser.
 
 **Open idea.** Write normals into the GLB at export, so other glTF viewers shade it too.
 The viewer would keep its fallback.
+
+## Step 6: LLM client
+
+### Before step 6: allowances and combined poses, re-checked
+
+All 8 examples were re-run through `run_tests(ctx)` + `run_checks`:
+
+| Example | Allowances | Findings | Combined-pose sweep |
+| --- | --- | --- | --- |
+| laptop | 0 | 0 | skipped (1 driver) |
+| four_bar | 0 | 0 | skipped (1 driver: the crank) |
+| gantry | 0 | 0 | ran, 0.06 s |
+| toaster | 0 | 0 | ran, 0.07 s |
+| door_hinge | 0 | 0 | skipped (1 driver) |
+| desk_lamp | 0 | 0 | ran, 0.12 s |
+| computer_mouse | 0 | 0 | ran, 0.04 s |
+| folding_chair | 0 | 0 | skipped (1 driver) |
+
+The two allowances the examples used to have (desk lamp tube/socket, mouse wheel/shell) both
+hid real defects. They were fixed in geometry in step 4b, so no example declares an
+allowance. The combined-joint sweep (range corners in Gray-code order, at most 64, plus 20
+seeded random poses) has been in `sdk/testing.py` since commit 30bc82a.
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `llm/messages.py` | 212 | **The** neutral message format (`System`, `User`, `Assistant`, `ToolResult`, `ToolCall`, `Tool`), its rules (`validate`), and conversion to and from Chat Completions |
+| `llm/protocol.py` | 87 | `Model.query(messages, tools) -> Reply`, `Usage`, `LLMError` / `ProviderError` / `BudgetExceeded` |
+| `llm/config.py` | 128 | Providers, roles, the price table (with its source and date), budget defaults, retry policy |
+| `llm/accounting.py` | 124 | `cost()`, `Budget`, `CallLog` (`runs/<id>/llm_calls.jsonl`) and its summary |
+| `llm/base.py` | 108 | What every model does around the provider call: validate, budget, cost, log, key redaction |
+| `llm/openai_chat.py` | 148 | OpenAI and DeepSeek through the `openai` package; retry with backoff |
+| `llm/scripted.py` | 61 | `ScriptedModel`: replays fixed replies, same protocol, no network |
+| `tests/test_llm.py` | 480 | 36 tests, no network |
+| `scripts/llm_smoke.py` | 114 | One real tool-call round trip per provider, printing tokens and cost |
+
+New dependency: **openai 3.57.0** (approved). It brings httpx2, pydantic, anyio, jiter.
+
+**The protocol.**
+
+```python
+class Model(Protocol):
+    provider: str
+    model: str
+    def query(self, messages: list[Message], tools=()) -> Reply: ...
+
+@dataclass
+class Reply:
+    text: str
+    tool_calls: tuple[ToolCall, ...]
+    usage: Usage          # input, cached input, cache write, output, reasoning tokens
+    cost: float | str     # USD, or "unknown"
+    raw: dict             # the provider's response as JSON data
+    provider, model, finish_reason, reasoning, latency_s, retries
+    def message(self) -> Assistant   # append to continue the conversation
+```
+
+```python
+model = get_model("builder", run_dir="runs/r1", budget=Budget(max_cost_usd=2, max_calls=50))
+messages = [System("..."), User("Build a laptop.")]
+reply = model.query(messages, tools)
+messages.append(reply.message())
+messages += [ToolResult(c.id, c.name, run(c)) for c in reply.tool_calls]
+```
+
+**Message format** (documented once, in `llm/messages.py`):
+
+| Message | Fields | Meaning |
+| --- | --- | --- |
+| `System` | content | Only at the start, so the cache prefix stays stable |
+| `User` | content | A user turn |
+| `Assistant` | content, tool_calls, reasoning | A model turn; `reasoning` is DeepSeek's `reasoning_content` |
+| `ToolResult` | call_id, name, content, is_error | Answers one tool call |
+
+Other parts:
+- **`ToolCall`** has `id`, `name`, `arguments` (the parsed dict) and `raw_arguments` (the
+  model's exact string). If the string is not a JSON object, `error` says why.
+- **`validate`** enforces three rules: system messages come first; every tool call is
+  answered before the next turn; a result answers an open call.
+
+**Providers.**
+- **One adapter** (`OpenAIChatModel`, Chat Completions) serves both providers. DeepSeek is
+  a `Provider` entry with its own `base_url` (`https://api.deepseek.com`) and
+  `DEEPSEEK_API_KEY`.
+- **Two differences**, both from the providers' docs:
+  - **The output cap.** OpenAI uses `max_completion_tokens` (`max_tokens` is deprecated
+    there). DeepSeek uses `max_tokens`.
+  - **The reasoning echo.** DeepSeek's thinking mode returns `reasoning_content`. It is sent
+    back on the assistant messages of the tool loop in progress (after the last user
+    message), and older reasoning is dropped. OpenAI never gets it back.
+- **Keys** come only from the provider's env var. A missing DeepSeek key is an error. It
+  never falls back to `OPENAI_API_KEY`, which the SDK would otherwise do.
+
+**Usage.** It is read from the Chat Completions `usage` object, and both providers fill the
+same fields:
+- `input_tokens` = `prompt_tokens`;
+- `cached_input_tokens` = `prompt_tokens_details.cached_tokens` (DeepSeek also reports
+  it as `prompt_cache_hit_tokens`);
+- `cache_write_tokens` = `prompt_tokens_details.cache_write_tokens`;
+- `output_tokens` = `completion_tokens`;
+- `reasoning_tokens` = `completion_tokens_details.reasoning_tokens`.
+
+Reasoning tokens are part of the output tokens and billed with them.
+
+**Cost.**
+
+```
+cost = ( (input − cached − cache_write) × input_price
+       + cached × cached_input_price
+       + cache_write × cache_write_price      (input price if the model has none)
+       + output × output_price ) / 1e6
+       × off-peak factor                      (DeepSeek only)
+```
+
+- An unknown model logs a warning and costs `"unknown"`, never $0.
+- An OpenAI call over 272K input tokens uses the long-context rate. If the table does not
+  have that rate, the cost is `"unknown"` too.
+- DeepSeek peak hours are 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday. Outside them
+  the rate is half. Chinese public holidays are also off-peak, but we don't have those
+  dates, so a call on a holiday is costed at peak: over, never under.
+
+**Price table** (`llm/config.py`). USD per 1M tokens, **checked 2026-11-23** on
+developers.openai.com/api/docs/pricing (Standard tier) and
+api-docs.deepseek.com/quick_start/pricing:
+
+| Model | Input | Cached input | Output | Notes |
+| --- | --- | --- | --- | --- |
+| gpt-6.2-astra | 8.00 | 0.40 | 40.00 | cache write 10.00; above 272K input: 16.00 / 0.80 / 60.00 |
+| gpt-6.2-sol | 2.00 | 0.10 | 10.00 | cache write 2.50; above 272K input: 4.00 / 0.20 / 15.00 |
+| gpt-6.1-terra | 1.00 | 0.05 | 5.00 | long-context rate not recorded |
+| gpt-6-luna | 0.10 | 0.01 | 0.50 | long-context rate not recorded |
+| deepseek-flash | 0.30 | 0.006 | 1.20 | peak rates; off-peak half (0.15 / 0.003 / 0.60) |
+| deepseek-v4-pro | 1.32 | 0.044 | 3.96 | peak rates; off-peak half |
+
+**Roles** (one line each, in `llm/config.py`):
+- `builder = STRONG = Role("openai", "gpt-6.2-astra")`. OpenAI's models page: "If you're
+  not sure where to start, use GPT-6.2 Astra, our flagship model for complex reasoning and
+  coding." Its model page lists `v1/chat/completions` and function calling as supported.
+- `cheap = CHEAP = Role("deepseek", "deepseek-flash")`. DeepSeek's pricing page: "Use
+  `deepseek-flash` as the model name". It is served by DeepSeek-V4.1-Flash and supports
+  tool calls.
+
+Switch with, for example, `ROLES["builder"] = CHEAP`.
+
+**Budget.** One `Budget(max_cost_usd, max_calls)` per run, shared by all its models.
+Defaults are $5 and 200 calls.
+- **Before a call:** it is refused if the call cap is reached or the cost cap is already
+  spent. The transport is not touched.
+- **After a call:** if it took the total over the cost cap, `BudgetExceeded` is raised with
+  the reply attached (it was paid for).
+- **Unknown-cost calls** count toward the call cap and log a warning that the cost cap
+  cannot count them.
+
+**Reliability.**
+- **Timeout:** each attempt has `timeout_s` (default 300 s; reasoning models are slow). The
+  SDK's own retries are off.
+- **Retries:** rate limits (429), 5xx and network errors (connection errors and timeouts),
+  at most 4 retries.
+- **Backoff:** 1, 2, 4, 8 s, times a jitter of 0.5-1.0, capped at 30 s. A server's
+  `Retry-After` is honoured, with the same 30 s cap.
+- **No retry on bad requests:** 400, 401, 403, 404 and 422 raise `ProviderError`
+  immediately.
+
+**Caching.** Both providers cache matching prompt prefixes automatically. The adapter keeps
+the prefix byte-identical between calls:
+- system messages first (enforced by `validate`);
+- tool schemas converted once and reused while the tools are the same;
+- tool-call arguments sent back exactly as the model wrote them, never re-serialized.
+
+Each log record has:
+- `prefix`, a 16-hex hash of the system prompt + tool schemas. If it changes inside a
+  conversation, the cache cannot be reused;
+- `usage.cached_share`.
+
+`CallLog.summary()` gives the run's cached share.
+
+**Logging.** Each call appends one line to `runs/<id>/llm_calls.jsonl`:
+
+```json
+{"time": "...", "role": "builder", "provider": "openai", "model": "gpt-6.2-astra",
+ "prefix": "3f9c...", "messages": 4, "tools": 1, "status": "ok", "served_model": "...",
+ "usage": {"input_tokens": 2000, "cached_input_tokens": 1500, "cache_write_tokens": 0,
+           "output_tokens": 10, "reasoning_tokens": 0, "cached_share": 0.75},
+ "cost": 0.005, "latency_s": 1.84, "retries": 1, "finish_reason": "stop",
+ "tool_calls": [], "budget": {"calls": 1, "spent_usd": 0.005, ...}}
+```
+
+- Failed calls are logged as `"status": "error"`, with the HTTP status and a redacted
+  message.
+- Records hold no message text and no keys. Provider errors can quote a key ("Incorrect API
+  key provided: sk-..."), so error text goes through `redact()`. That removes the
+  configured key and anything shaped like `sk-...`.
+
+### Tests (36, no network)
+
+- **Messages:**
+  - conversion both ways, including tool calls;
+  - argument strings kept exactly;
+  - reasoning echoed only for the current tool loop;
+  - bad JSON arguments;
+  - tool schemas both ways;
+  - 5 rule violations.
+- **Usage:** OpenAI and DeepSeek shapes.
+- **Cost:**
+  - cached tokens: $0.0592 vs $0.12 uncached on gpt-6.2-astra;
+  - cache writes;
+  - reasoning inside output;
+  - long-context rate, and an unknown long-context rate;
+  - DeepSeek peak, weekday off-peak and weekend;
+  - an unknown model gives `"unknown"` plus a warning;
+  - every role has a provider and a price.
+- **Adapter** (a fake transport in place of `chat.completions.create`):
+  - the OpenAI request shape (cap parameter, tools, `reasoning_effort`, timeout);
+  - parsing of a tool-call reply;
+  - DeepSeek's cap parameter and `reasoning_content` echo;
+  - a byte-identical prefix across calls;
+  - keys only from their own env var.
+- **Retries:**
+  - 429/500/503 retried with sleeps of 1, 2 and 4 s;
+  - connection errors and timeouts retried;
+  - `Retry-After` 7 s honoured and 999 s capped at 30 s;
+  - exactly 5 attempts, then `ProviderError`;
+  - 400/401/404/422 tried once;
+  - a custom policy.
+- **Budget:**
+  - the call cap refuses before the call is made;
+  - the cost cap raises after the call that crosses it, with that reply attached, and
+    refuses after that;
+  - one budget shared by two models;
+  - unknown cost counts as a call.
+- **Log:**
+  - fields, the cached share, the same prefix for the same system prompt and tools;
+  - error records;
+  - a key quoted in a 401 message does not reach the exception or the file.
+- **ScriptedModel:**
+  - a full tool loop, costed like the named model;
+  - running out of replies;
+  - a tool that was not offered;
+  - a bad conversation.
+- **Through the real `openai` package**, with only HTTP mocked (`httpx2.MockTransport`):
+  - a 429 and then a tool-call reply from the DeepSeek URL;
+  - the request JSON the SDK actually sends;
+  - the bearer header;
+  - `reasoning_content` and usage parsed back;
+  - no key in the log.
+
+**273 tests pass.**
+
+**Not verified here: the real APIs.** This machine has no OpenAI or DeepSeek key, so
+`scripts/llm_smoke.py` has only been run without keys (both providers are skipped
+cleanly). Two things only a real call can confirm:
+- that DeepSeek accepts `reasoning_content` echoed in a thinking-mode tool loop. The thinking
+  mode guide failed to load (HTTP 525); the API reference documents the field on replies;
+- that `cache_write_tokens` is the field OpenAI uses for cache writes. That name came from a
+  summary of the API reference page, not its verbatim text. If the field is absent, writes
+  are simply billed as input.
+
+The smoke script exercises the first point. Its `--cache` option exercises caching.
+
+### How Articraft does it (study §6)
+
+- **Files:** `agent/protocols.py` (`Model.query`) and `agent/provider/` (OpenAI, Anthropic,
+  Gemini, OpenRouter, plus a shared `_chat.py`).
+- **Reply:** each adapter returns `{text, tool_calls, token_usage, cost, provider_content}`.
+- **OpenAI:** the Responses API over WebSocket, with a `previous_response_id` chain.
+- **Anthropic:** explicit 1-hour cache control.
+- **Retries:** up to 4 attempts with exponential backoff (0.5-20 s), inside each adapter.
+- **Cost:** hard-coded price tables. An unknown model is recorded as $0.
+- **No cost cap.**
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| One adapter (Chat Completions) for two providers, instead of four adapters | DeepSeek speaks the same API. Fewer converters, fewer places for format bugs |
+| Unknown model or rate → cost `"unknown"` plus a warning, never $0 | A $0 entry hides real spend |
+| Per-run cost and call caps (`BudgetExceeded`), checked before every call | An agent loop can otherwise spend without limit |
+| Retry policy in one place, shared by both providers; no retry on 4xx | Bad requests do not get better by repeating them |
+| Prices with their source URL and check date; DeepSeek off-peak; OpenAI long-context and cache-write rates | Costs are only useful if they are right and you can see how old they are |
+| Exact argument strings sent back; a prefix hash in every log record | Automatic caching needs a byte-identical prefix, and the hash shows when it breaks |
+| Keys redacted from logged errors | A 401 message can quote the key |
+
+### Open ideas
+
+- **Responses API for OpenAI:** `previous_response_id` would send only new items each turn
+  (Articraft does this). It would mean a second converter, so wait until the agent loop
+  shows the cost of resending.
+- **`prompt_cache_key`:** OpenAI routes requests with the same key to the same cache. Check
+  its docs before using it.
+- **Strict tool schemas:** DeepSeek's beta `strict` mode (at `/beta`) and OpenAI Structured
+  Outputs would reject malformed arguments at the source.
+- **Streaming:** show progress on long reasoning calls. It is not needed for correctness.
+- **Price freshness check:** warn when `PRICES_CHECKED` is more than, say, 60 days old.
+- **Run storage (step 11)** will want to save the neutral messages; add `to_dict` /
+  `from_dict` then.

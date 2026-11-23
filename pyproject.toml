@@ -11,6 +11,7 @@ dependencies = [
     "build123d>=0.9",
     "manifold3d>=3.5.5",
     "python-fcl>=0.7.0.11",
+    "openai>=3.57.0",
 ]
 
 [dependency-groups]

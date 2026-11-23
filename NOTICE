@@ -41,6 +41,10 @@ Articraft module):
   payload, typed compile signals rendered as a <compile_signals> block with response
   rules and repeat detection, and some rule and hint wording, from
   articraft/compiler/* and articraft/agent/workspace/local.py. Rewritten and extended.
+- llm/protocol.py
+  The shape of a model reply (text, tool calls, token usage, cost, raw provider content)
+  and the retry count (4, exponential backoff), from articraft/agent/protocols.py and
+  articraft/agent/provider/*. Rewritten.
 - docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
   A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
   source for commentary, and an inventory of its mesh helpers.

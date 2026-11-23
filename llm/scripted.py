@@ -35,13 +35,16 @@ class ScriptedModel(ChatModelBase):
         self.supports_images = supports_images
         self.replies = list(replies)
         self.requests: list[tuple[list[Message], tuple[Tool, ...]]] = []
+        self.options: list[dict[str, Any]] = []  # per-call overrides (effort, ...)
         self._ids = 0
 
     def _cost(self, usage: Usage, at: datetime) -> Cost:
         return accounting.cost(self.model, usage, at) if self.model in config.PRICES else 0.0
 
-    def _complete(self, messages: list[Message], tools: tuple[Tool, ...]) -> Completion:
+    def _complete(self, messages: list[Message], tools: tuple[Tool, ...],
+                  options: dict[str, Any]) -> Completion:
         self.requests.append((list(messages), tools))
+        self.options.append(dict(options))
         if not self.replies:
             raise LLMError(f"ScriptedModel has no reply left (call {len(self.requests)})")
         reply = self.replies.pop(0)

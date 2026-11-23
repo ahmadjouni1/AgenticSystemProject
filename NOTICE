@@ -58,6 +58,12 @@ Articraft module):
   run; conversation.jsonl and a run record, from articraft/agent/harness.py. Rewritten;
   the blocking-check requirement, end states, budgets, best build and per-turn metrics
   are new. The prompts were written for this project.
+- agent/context.py
+  Keeping the first messages (system prompt, quickstart, task) fixed, summarizing the
+  middle of the conversation into a checkpoint with fixed headings while keeping the
+  recent turns, and clipping tool outputs in the summary input, from
+  articraft/agent/compaction.py. Rewritten; the per-checkpoint rules (reasoning, pinned
+  state, doc notes, old-output shortening) and the low threshold are new.
 - docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
   A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
   source for commentary, and an inventory of its mesh helpers.

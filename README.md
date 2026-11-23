@@ -25,7 +25,7 @@ uv sync
 uv run pytest -q
 ```
 
-The suite has 320 tests, none of which use the network. It takes about 90 s, most of it in the compiler tests, which
+The suite has 337 tests, none of which use the network. It takes about 2 min, most of it in the compiler tests, which
 start real subprocesses. The viewer's JavaScript tests run under Node.js if it is
 installed, and are skipped otherwise.
 
@@ -62,6 +62,12 @@ uv run python -m agent "a drawer that slides out of a cabinet"
 uv run python -m viewer runs/<the run folder it prints>
 ```
 
+By default the agent uses the context policy (`--context v1`: checkpoints, pinned file
+state, compaction by the cheap model), low reasoning effort once the latest compile passed
+(`--effort adaptive`) and a 15-minute limit (`--max-time 900`). `--context none --effort
+default` gives the step 8 behaviour. Compare batches of runs with
+`uv run python scripts/context_report.py <runs folder> <runs folder>`.
+
 Call the agent's tools by hand (write, compile, render, probe) on the laptop and the drawer:
 
 ```shell
@@ -97,8 +103,8 @@ The steps follow the parts of the original listed in the study.
 | 6 | LLM client: neutral messages, OpenAI + DeepSeek, usage, cost (price table dated), budget caps, retries, prompt-cache-friendly prefix, call log, ScriptedModel | Done |
 | 7 | Agent tools: read, write, edit, compile, render, probe; structured errors; path scoping; output cap; fixed schema order | Done |
 | 8 | Agent loop: prompts v0, stop rule (fresh passing compile), end states, best build, run folder with conversation and per-turn record, CLI | Done |
-| 9 | Context and memory | Next |
-| 10 | System prompt and SDK docs | Planned |
+| 9 | Context and memory: checkpoints (old reasoning not re-sent), pinned file state, doc notes, old-output shortening, compaction, reasoning cap on routine turns, wall-clock budget, optional lessons file; measured before/after | Done |
+| 10 | System prompt and SDK docs | Next |
 | 11 | Run storage | Planned |
 | 12 | Evaluation | Planned |
 | 13 | Extras (images, simulation, trajectories) | Planned |

@@ -62,8 +62,10 @@ class Model(Protocol):
     provider: str
     model: str
 
-    def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = ()) -> Reply:
-        """One model call. Raises LLMError (ProviderError, BudgetExceeded) on failure."""
+    def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = (), *,
+              effort: str | None = None, max_output_tokens: int | None = None) -> Reply:
+        """One model call. Raises LLMError (ProviderError, BudgetExceeded) on failure.
+        ``effort`` / ``max_output_tokens`` override the model's settings for this call."""
 
 
 class LLMError(RuntimeError):

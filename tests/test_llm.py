@@ -517,3 +517,13 @@ def test_env_file_is_git_ignored() -> None:
     done = subprocess.run(["git", "check-ignore", ".env"], cwd=root, capture_output=True,
                           text=True, check=False)
     assert done.returncode == 0 and done.stdout.strip() == ".env"
+
+
+def test_empty_assistant_messages_are_not_sent() -> None:
+    messages = [System("s"), User("u"), Assistant("", (), reasoning="long thought"),
+                User("<reminder>"), Assistant("ok")]
+    chat = to_chat(messages, reasoning="current_turn")
+    assert [m["role"] for m in chat] == ["system", "user", "user", "assistant"]
+    # In the current turn the reasoning is the content: it is kept.
+    current = to_chat(messages[:3], reasoning="current_turn")
+    assert current[-1] == {"role": "assistant", "content": "", "reasoning_content": "long thought"}

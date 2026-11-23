@@ -1895,3 +1895,232 @@ after these runs.
 - **Repair stages:** explicit plan → build → check → fix stages (study §8 idea). Today the
   prompt asks for them, but the loop does not enforce them.
 - **REQUIRED before any OpenAI evaluation:** the Responses API adapter (see step 6).
+
+## Step 9: Context and memory
+
+Goal: fewer tokens per run without lowering success, measured on 4 prompts × 2 runs, before
+and after. The step 8 follow-up fixes (quickstart wording, cut-off hint, context estimate) were
+already in the step 8 commit (a6c4723); nothing was left uncommitted.
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `agent/context.py` | 311 | `ContextPolicy`: the sent view of the conversation, rules a-e, hit counts |
+| `agent/lessons.py` | 78 | Cross-run lessons (`runs/lessons.md`), off by default |
+| `agent/loop.py`, `agent/__main__.py` | (changed) | The policy applied before every query; checkpoints; `EffortPolicy`; wall-clock budget (`time_exceeded`); `--context`, `--effort`, `--max-time`, `--lessons` |
+| `llm/*` | (changed) | Per-call `effort` / `max_output_tokens` overrides; empty assistant messages are not sent |
+| `scripts/context_report.py` | 127 | Before/after tables from `record.json` files |
+| `scripts/deepseek_reasoning_probe.py` | 84 | A live check of which reasoning send-back variants DeepSeek accepts |
+| `tests/test_context.py` | 307 | 16 tests: each rule, pairing, prefix, saved history, effort, time, lessons |
+
+**The policy** (`ContextPolicy.view(history, turns, turn)`, applied before every query). The
+full history is unchanged and still saved to `conversation.jsonl`.
+
+| Rule | What it does | When |
+| --- | --- | --- |
+| a. checkpoints + reasoning | A compile's signals are sent as a user message, `<checkpoint turn=N compile=error primary=validation version=none>` + the signal block, after the tool results. The compile tool result says "[in the <checkpoint> message ...]" | After every compile |
+| b. pinned state | Per workspace file, only the latest snapshot (a `read` result or a `write`'s content) stays in full; older ones become "[older read of main.py, superseded at turn N]" / "[older content of main.py, ...]". Only the latest compile signals stay in full | At rebuilds |
+| c. docs in context | `read docs/sdk/quickstart.md` returns "docs/sdk/quickstart.md is already in your context (the second system message) ..." | When the tool runs |
+| d. old outputs | Tool results older than 6 turns: the first 5 lines + "[... shortened: output from turn N; call the tool again ...]". `probe` and `render` are kept in full, and so is the latest snapshot of a workspace file | At rebuilds |
+| e. compaction | Above 40k estimated tokens, the middle of the conversation (after the task, before the last 4 turns, cut at an assistant message) goes to the cheap model (deepseek-flash), on the same budget. The summary has 4 headings: Tried / Failed / Works / Next. A `<checkpoint kind=summary turns=a-b>` holds it, plus the current main.py read from disk | When over the threshold |
+
+Rule a and DeepSeek's reasoning:
+- `to_chat` already sends reasoning only after the last user message.
+- So a checkpoint user message starts a new turn, and the finished tool loop's reasoning is
+  no longer sent.
+
+**Cache-friendliness.**
+- **The prefix** (system prompt, quickstart, task, tool schemas) never changes. Every test
+  checks it.
+- **Rewriting only at rebuilds.** Rules b, d and e are applied only when the view is
+  rebuilt, at a checkpoint or a compaction. Between checkpoints the view only grows at the
+  end, which a test checks.
+- **The price:** each rebuild invalidates the cache from the first changed message on.
+  Uncached input went from 3.5k to 7.8k tokens per run (cached share 97.8% → 88.9%).
+
+**Output limits.**
+- **`EffortPolicy`:** once the latest compile passed (verifying, probing, finishing), calls
+  get `reasoning_effort="low"` and `max_tokens=16000`. Planning and fixing turns keep the
+  model's default.
+- **Wall clock:** a 15-minute budget per run, checked before every query. A new end state,
+  `time_exceeded`.
+
+**Cross-run lessons** (`--lessons`, **off** for all measurements):
+- **What is learned:** after a run, the primary issue of each failed compile of kind
+  runtime_error / validation / syntax / import is added to `runs/lessons.md`. For example:
+  "AttributeError: 'Box' object has no attribute 'translate' (check the SDK quickstart for
+  the right method or argument)". Duplicates are dropped and at most 15 are kept.
+- **How it is used:** the next run appends them to the system prompt under "Pitfalls seen
+  in earlier runs".
+- **What is left out:** check failures (collisions, floating parts) are one object's design,
+  not SDK pitfalls.
+
+**DeepSeek's reasoning rule, verified live.** The thinking-mode guide, which holds the rule,
+did not load (HTTP 525 earlier, and the related reasoning-model page now gives 404). The
+multi-round and changelog pages do not state it. So `scripts/deepseek_reasoning_probe.py` asked
+the API directly with deepseek-v4-pro: one `add(2, 3)` tool call, then 4 follow-up variants.
+
+| Variant | Result |
+| --- | --- |
+| `echo`: reasoning kept on the tool-call message | 200, "2 + 3 = **5**" |
+| `checkpoint_drop`: a user checkpoint follows, reasoning dropped (rule a) | 200, "2 + 3 = **5**" |
+| `drop_in_loop`: reasoning dropped with no user message | 200, "2 + 3 = **5**" |
+| `old_echo`: old reasoning still sent after a user message | 200, "2 + 3 = **5**" |
+
+So rule a is accepted, and in fact every variant is; whether quality differs was not
+measured. The live runs below also used rule a on every compile without an error from it.
+
+### Measurement (DeepSeek builder = deepseek-v4-pro, $1 cap, 2026-11-23 17:35-18:10 UTC, off-peak)
+
+Before: `runs/step9-baseline/` (the step 8 loop). After: `runs/step9-after/` (`--context v1
+--effort adaptive`, 15-minute cap). 2 runs per prompt.
+
+| Prompt | Success | Turns | Input tokens / run | Peak input | Cost / run | Time / run |
+| --- | --- | --- | --- | --- | --- | --- |
+| a drawer that slides out of a cabinet | 2/2 → 2/2 | 4.5 → 9.5 | 56,526 → 81,256 | 16,599 → 17,088 | $0.0278 → $0.0418 | 128 → 162 s |
+| a four-bar linkage | 2/2 → 2/2 | 9.0 → 9.5 | 190,452 → 82,826 | 38,692 → 28,732 | $0.0706 → $0.0688 | 331 → 329 s |
+| a desk lamp with two hinged arms | 2/2 → 1/2 | 8.5 → 5.5 | 304,555 → 61,994 | 46,000 → 21,410 | $0.0900 → $0.0789 | 423 → 416 s |
+| a toolbox with a hinged lid and a sliding tray | 2/2 → 2/2 | 6.0 → 7.5 | 95,856 → 54,687 | 20,823 → 16,019 | $0.0352 → $0.0334 | 164 → 150 s |
+
+| Batch | Success | Turns | Input tok / run | Cached | Output tok / run | Peak input (mean / max) | Cost / run | Cost total | Output share of cost | Time / run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 8/8 | 7.0 | 161,847 | 97.8% | 25,290 | 30,529 / 61,753 | $0.0559 | $0.447 | 90% | 262 s |
+| after | 7/8 | 8.0 | **70,191 (−57%)** | 88.9% | 24,854 | **20,812 (−32%) / 35,295 (−43%)** | $0.0557 | $0.446 | 88% | 264 s |
+| after, desk lamp re-run after the fix below | 2/2 | 10.0 | 131,235 | 87% | 42,094 | 28,816 / 29,114 | $0.0979 | $0.196 | - | 438 s |
+
+**Policy hits** (all 8 after-runs):
+- a_checkpoints 13, a_reasoning_dropped 39 (assistant messages whose reasoning was no
+  longer sent);
+- b_pinned_stubs 13;
+- c_doc_notes 4: the quickstart was re-read in 4 of 8 runs;
+- d_shortened 0: runs are 5-11 turns, so few outputs reach 6 turns old after rules a and b;
+- e_compactions 0 (none over 40k);
+- effort: 39 default turns, 25 low.
+
+In the 2 re-runs: a 3, a_reasoning_dropped 9, b 2, c 2, **e_compactions 1**.
+
+What the numbers say:
+- **Context: cut as intended.** Input tokens per run −57%; peak input −32% on average and
+  −43% at the maximum (61.7k → 35.3k). The biggest saving is rule a. Before, every
+  reasoning block since the task was re-sent on every later turn (whole planning turns of
+  20-30k reasoning tokens).
+- **Cost: unchanged ($0.0559 → $0.0557 per run).**
+  - 88-90% of the cost is output tokens, almost all of it reasoning, and 92% of the
+    reasoning is in the turns before the first compile: 21.3k tokens per run before, 19.3k
+    after. Planning and writing turns run at the default effort.
+  - The input was already 98% cached at $0.022-0.044 per 1M tokens. The rebuilds doubled
+    uncached input (3.5k → 7.8k tokens per run), which offsets the smaller context.
+  - The low-effort routine turns saved nothing measurable: the 25 low turns averaged 118
+    reasoning tokens, and those turns were already cheap.
+- **Turns: +1 on average.** The drawer took 4.5 → 9.5 turns (1 extra failed compile, and 1
+  run with 2 passing compiles). The desk lamp's average includes the errored run. With 2
+  runs per prompt this is within noise; no clear effect on success or turns.
+- **Time: unchanged (262 → 264 s).** It is dominated by reasoning latency (planning turns of
+  200-350 s).
+- **time_exceeded:** never fired; the longest run was 603 s.
+
+**The one failure was a pre-existing bug, now fixed.** In a desk-lamp after-run:
+- **Turn 3:** the model reasoned for 32,000 tokens (352 s), hit the output cap, and returned
+  no text and no tool call.
+- **Then:** the loop added a reminder, so that empty assistant message lost its reasoning on
+  the next request. DeepSeek rejected it: HTTP 400 "Invalid assistant message: content,
+  tool_calls or reasoning_content must be set".
+- **Not the policy:** it is a `to_chat` issue and could have happened in the baseline too.
+- **Fixes:**
+  - `to_chat` skips an assistant message with no content, no tool calls and no echoed
+    reasoning;
+  - an empty cut-off reply now gets `<reply_cut_off>` ("plan in a few lines, then call write
+    ...") instead of `<compile_required>`;
+  - 2 regression tests.
+
+Two re-runs of that prompt then succeeded. One of them compacted live:
+- **When and why:** at turn 5, reasoning echoed inside the current tool loop (21k + 23k)
+  pushed the estimate to 43.6k.
+- **What it did:** deepseek-flash summarized turn 1 for $0.0004, and the request went out at
+  24.3k.
+- **The cost:** the rewrite broke the cache (12% cached that turn), which cost more than the
+  summary saved.
+
+### Tests (16 new, no network)
+
+- **a:**
+  - the checkpoint follows the compile result, which points to it;
+  - no reasoning is sent from finished loops, and the current loop's reasoning still is;
+  - hit counts;
+  - the saved conversation keeps the checkpoint, the full signals and all 3 reasoning
+    blocks.
+- **b:**
+  - after 2 reads, 1 write and 3 compiles, only the latest read and the latest signals stay
+    whole, with "superseded at turn N" stubs;
+  - nothing is stubbed between checkpoints;
+  - the saved history still has the original write.
+- **c:** the quickstart read gives the note; `docs/sdk/README.md` is still read; the path
+  forms `./`, `\`.
+- **d:**
+  - a turn-2 compile result is cut to its first lines plus a stub;
+  - a probe result and a turn-4 result are kept.
+- **e:**
+  - a scripted cheap model writes the summary, which holds the current main.py from disk;
+  - the summary call is on the run's budget;
+  - no summarizer means compaction is skipped.
+- **Every view:** `validate()` (the tool-call/result pairing) and the same first 3 messages,
+  byte-identical in `to_chat`. Between checkpoints, each view is a prefix of the next.
+- **Record:** the policy config, hits, summaries, and both context sizes (sent vs history).
+- **Effort:** the first 4 calls `{}`, then `{"effort": "low", "max_output_tokens": 16000}`
+  once the compile passed.
+- **`time_exceeded`:** with a stubbed clock.
+- **Lessons:**
+  - off: nothing is learned;
+  - on: the `Box.translate` error is learned once, and shows up in the next run's system
+    prompt.
+- **No policy:** the full history is sent.
+- **Regression:** an empty cut-off reply is never sent as an empty assistant message.
+
+**336 tests pass, 1 skipped** (16 new here, plus 1 in `test_llm.py`).
+
+### How Articraft does it (study §9)
+
+- **Files:** `agent/compaction.py`, `prompts/compaction.md`, and the provider's
+  `summarize_context` (Anthropic's native compaction beta).
+- **History:** append-only and verbatim. Messages 0-2 (system prompt, quickstart, task) stay
+  forever.
+- **Trimming:** nothing is trimmed per turn. Only tool outputs are kept small (compile
+  returns only its signals; exec output is capped at 10k tokens).
+- **Compaction:** it starts above the window minus 16k (about 256k tokens) and keeps the
+  newest 20k tokens or more. The rest is summarized with fixed headings, with tool outputs
+  clipped to 2,000 characters; the checkpoint lists the modified files.
+- **Docs:** read on demand. **Cross-run memory:** none.
+- **Weak points:**
+  - superseded main.py reads, old images and old compile reports are billed again every
+    turn;
+  - typical runs never reach 256k, so they never compact.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| Compile signals as checkpoint user messages; finished loops' reasoning not re-sent | DeepSeek's thinking mode re-sends reasoning for the whole tool loop, which in an agent run is the whole run. This was the largest part of the context (−57% input) |
+| Pinned state: the latest file snapshot and the latest compile signals only | Articraft's weak point: superseded reads and reports billed every turn |
+| A note for re-reading a doc already in context | Seen in 4 of 8 runs |
+| Rewrites only at checkpoints | Keeps the cached prefix as long as possible between checkpoints |
+| Compaction at 40k (configurable), by the cheap model, with the current main.py from disk | Articraft's 256k threshold is never reached in practice. The file is copied, not summarized, so it cannot be misremembered |
+| Wall-clock budget, `time_exceeded` | One planning turn can take 350 s |
+| Cross-run lessons file, off by default | Articraft has no cross-run memory. It stays off until it can be measured on its own |
+
+### Open ideas
+
+- **The real cost lever is planning-turn reasoning:** 92% of reasoning comes before the first
+  compile. Try `reasoning_effort` for the planning turn (low vs high), a lower output cap
+  with the `<reply_cut_off>` guidance, or a brief explicit plan in the prompt (step 10).
+  Measure success along with the cost.
+- **Drop reasoning without waiting for a checkpoint:** the probe shows DeepSeek accepts
+  reasoning dropped inside a loop (`drop_in_loop`). Sending only the latest reply's reasoning
+  would have avoided the live compaction. Quality is not measured yet.
+- **Fewer rebuilds:** batch the rule b and d rewrites into every 2nd or 3rd checkpoint, to
+  win back the cache (uncached input doubled).
+- **Compaction trigger:** count the reasoning that rule a is about to drop before deciding
+  to compact.
+- **More runs per prompt:** with 2 runs, the drawer's 4.5 → 9.5 turns cannot be told from
+  noise. Use 5 or more for step 12.
+- **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).

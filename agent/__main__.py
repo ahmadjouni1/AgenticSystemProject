@@ -14,7 +14,8 @@ import argparse
 import json
 import sys
 
-from agent.loop import MAX_TURNS, RUNS_ROOT, new_run_dir, run
+from agent.context import ContextConfig, ContextPolicy
+from agent.loop import MAX_TIME_S, MAX_TURNS, RUNS_ROOT, EffortPolicy, new_run_dir, run
 from llm import Budget, config, get_model, load_env
 
 
@@ -64,20 +65,38 @@ def main(argv: list[str] | None = None) -> int:
                         help="USD per run")
     parser.add_argument("--max-calls", type=int, default=config.DEFAULT_MAX_CALLS)
     parser.add_argument("--runs", default=str(RUNS_ROOT), help="folder for run folders")
+    parser.add_argument("--context", choices=["v1", "none"], default="v1",
+                        help="context policy (agent/context.py); none sends the full history")
+    parser.add_argument("--effort", choices=["adaptive", "default"], default="adaptive",
+                        help="adaptive: low reasoning effort once the latest compile passed")
+    parser.add_argument("--max-time", type=float, default=MAX_TIME_S,
+                        help="wall-clock seconds per run")
+    parser.add_argument("--lessons", action="store_true",
+                        help="use and update runs/lessons.md (off by default)")
     args = parser.parse_args(argv)
     load_env()
     run_dir = new_run_dir(args.prompt, args.runs)
     budget = Budget(max_cost_usd=args.max_cost, max_calls=args.max_calls)
     model = get_model(args.role, run_dir=run_dir, budget=budget)
+    context = None
+    if args.context == "v1":  # the cheap model writes compaction summaries, on the same budget
+        context = ContextPolicy(ContextConfig(), get_model("cheap", run_dir=run_dir,
+                                                           budget=budget),
+                                workspace=run_dir / "workspace")
+    effort = EffortPolicy() if args.effort == "adaptive" else None
     print(f"run folder: {run_dir}\nmodel: {model.provider}/{model.model} (role {args.role}), "
-          f"budget ${args.max_cost:.2f} / {args.max_calls} calls, {args.max_turns} turns",
-          flush=True)
+          f"budget ${args.max_cost:.2f} / {args.max_calls} calls / {args.max_time:.0f} s, "
+          f"{args.max_turns} turns; context {args.context}, effort {args.effort}"
+          + (", lessons on" if args.lessons else ""), flush=True)
     result = run(args.prompt, model, budget, args.max_turns, run_dir=run_dir,
-                 on_event=print_event)
+                 on_event=print_event, context=context, effort=effort,
+                 max_time_s=args.max_time, lessons=args.lessons)
     record = result.record
     print(f"\n{result.status}: {result.reason}")
     print(json.dumps({k: record[k] for k in ("turns", "compiles", "cost_usd", "duration_s")}))
     print(f"tokens: {record['tokens']}")
+    if record["context_policy"]:
+        print(f"context policy hits: {record['context_policy']['hits']}")
     print(f"run folder: {result.run_dir}\nview it: uv run python -m viewer {result.run_dir}")
     return 0 if result.status == "success" else 1
 

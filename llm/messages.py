@@ -169,14 +169,21 @@ def to_chat(messages: list[Message], reasoning: ReasoningEcho = "never") -> list
             chat.append({"role": "tool", "tool_call_id": message.call_id,
                          "content": message.content})
         else:
+            echo = reasoning == "current_turn" and i > last_user and bool(message.reasoning)
+            if not message.content and not message.tool_calls and not echo:
+                # Nothing to send (an empty reply, e.g. cut off while reasoning). DeepSeek
+                # rejects an assistant message without content, tool_calls or reasoning.
+                continue
             item: dict[str, Any] = {"role": "assistant", "content": message.content or None}
             if message.tool_calls:
                 item["tool_calls"] = [
                     {"id": c.id, "type": "function",
                      "function": {"name": c.name, "arguments": c.arguments_json()}}
                     for c in message.tool_calls]
-            if reasoning == "current_turn" and i > last_user and message.reasoning:
+            if echo:
                 item["reasoning_content"] = message.reasoning
+                if not message.content and not message.tool_calls:
+                    item["content"] = ""
             chat.append(item)
     return chat
 

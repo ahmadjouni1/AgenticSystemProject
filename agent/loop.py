@@ -17,7 +17,8 @@ that compile (its digest equals the compile's). Otherwise a short ``<compile_req
 or ``<final_response_required>`` reminder is added and the loop goes on.
 
 **End states:** ``success``, ``failed_checks`` (the model keeps finishing while its latest
-compile fails its checks), ``budget_exceeded``, ``max_turns``, ``no_progress`` (3 empty
+compile fails its checks), ``budget_exceeded``, ``time_exceeded`` (wall clock, 15 min by
+default), ``max_turns``, ``no_progress`` (3 empty
 replies in a row, 5 identical compile failures in a row, or 3 refused finishes without a
 failing build to blame), ``error``. Every run keeps its best build: the latest version
 that passed the checks, else the last build that failed them.
@@ -38,11 +39,13 @@ import traceback
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agent import lessons as lessons_file
+from agent.context import ContextPolicy, checkpoint_text
 from agent.tools import BY_NAME, ToolContext, ToolOutput, run_tool, schemas
 from compiler import compile as compile_run
 from compiler import workspace_digest
@@ -59,12 +62,21 @@ TEMPLATE = REPLICA_ROOT / "prompts" / "main_template.py"
 RUNS_ROOT = REPLICA_ROOT / "runs"
 
 MAX_TURNS = 60
+MAX_TIME_S = 15 * 60  # wall clock per run
 MAX_EMPTY_REPLIES = 3
 MAX_SAME_FAILURES = 5
 MAX_REFUSED_FINISHES = 3
 PARALLEL_WORKERS = 4
 
 Event = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class EffortPolicy:
+    """Less reasoning on routine turns. A turn is routine once the latest compile passed
+    (verifying, probing, finishing); planning and fixing turns keep the model's default."""
+    routine_effort: str = "low"
+    routine_max_output_tokens: int = 16_000
 
 
 @dataclass
@@ -163,6 +175,13 @@ def compile_required(reason: str) -> str:
             "</compile_required>")
 
 
+REPLY_CUT_OFF = (
+    "<reply_cut_off>\nYour last reply reached the output token limit while reasoning and "
+    "produced no answer and no tool call. Keep your reasoning short: plan the bodies and joints "
+    "in a few lines, then call write with a first version of main.py, and refine it with edit "
+    "after compiling.\n</reply_cut_off>")
+
+
 FINAL_RESPONSE_REQUIRED = (
     "<final_response_required>\nThe latest compile passed and nothing changed since. Reply "
     "with a short final message (bodies, joints and their ranges) and no tool calls.\n"
@@ -174,8 +193,13 @@ FINAL_RESPONSE_REQUIRED = (
 
 class _Run:
     def __init__(self, prompt: str, model: Model, budget: Budget, max_turns: int, run_dir: Path,
-                 compiler: Callable, on_event: Callable[[Event], None] | None):
+                 compiler: Callable, on_event: Callable[[Event], None] | None,
+                 context: ContextPolicy | None, effort: EffortPolicy | None,
+                 max_time_s: float | None, lessons: bool):
         self.prompt, self.model, self.budget, self.max_turns = prompt, model, budget, max_turns
+        self.context, self.effort, self.max_time_s, self.lessons = (context, effort, max_time_s,
+                                                                    lessons)
+        self.effort_turns: Counter[str] = Counter()
         self.run_dir = run_dir
         self.on_event = on_event or (lambda event: None)
         self.files = _Files(run_dir)
@@ -183,6 +207,7 @@ class _Run:
         self.tools = schemas()
         self.tools_chars = len(json.dumps(tools_to_chat(self.tools), ensure_ascii=False))
         self.messages: list[Message] = []
+        self.turn_of: list[int] = []  # the turn each message was added in
         self.turn = 0
         self.started = time.time()
         self.usage = Usage()
@@ -201,15 +226,17 @@ class _Run:
 
     def add(self, message: Message, **extra: Any) -> None:
         self.messages.append(message)
+        self.turn_of.append(self.turn)
         self.files.log(self.turn, message, **extra)
 
-    def context_tokens(self) -> int:
-        """What the next request sends, about 4 characters per token: messages as the
-        provider receives them (DeepSeek also gets the current tool loop's reasoning back)
-        plus the tool schemas."""
+    def context_tokens(self, messages: list[Message] | None = None) -> int:
+        """What a request sends, about 4 characters per token: messages as the provider
+        receives them (DeepSeek also gets the current tool loop's reasoning back) plus the
+        tool schemas. Default: the full history."""
         settings = getattr(self.model, "settings", None)
         echo = getattr(settings, "reasoning_echo", "never")
-        chars = len(json.dumps(to_chat(self.messages, echo), ensure_ascii=False))
+        messages = self.messages if messages is None else messages
+        chars = len(json.dumps(to_chat(messages, echo), ensure_ascii=False))
         return round((chars + self.tools_chars) / 4)
 
     def record(self, status: str, reason: str = "") -> dict[str, Any]:
@@ -235,6 +262,16 @@ class _Run:
             "budget": self.budget.to_dict(),
             "best": best, "best_description": describe_best(best),
             "final_text": self.final_text,
+            "peak_context_tokens_est": max((t.get("context_tokens_est", 0)
+                                            for t in self.per_turn), default=0),
+            "peak_input_tokens": max((t.get("input_tokens", 0) for t in self.per_turn),
+                                     default=0),
+            "context_policy": None if self.context is None else {
+                "config": asdict(self.context.config), "hits": dict(self.context.hits),
+                "summaries": self.context.summaries},
+            "effort_turns": dict(self.effort_turns),
+            "max_time_s": self.max_time_s,
+            "lessons": self.lessons,
             "per_turn": self.per_turn,
         }
         self.files.save(record)
@@ -281,8 +318,7 @@ class _Run:
                 j += 1
             if j - i > 1:  # a run of parallel-safe calls
                 with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
-                    batch = list(pool.map(lambda c: run_tool(self.ctx, c.name, c.arguments),
-                                          calls[i:j]))
+                    batch = list(pool.map(self._run_one, calls[i:j]))
                 outputs[i:j] = batch
                 i = j
                 continue
@@ -300,9 +336,16 @@ class _Run:
                         "hint": "send the arguments as one JSON object"}
                 outputs[i] = ToolOutput(call.name, data, json.dumps(data), [], True)
             else:
-                outputs[i] = run_tool(self.ctx, call.name, call.arguments)
+                outputs[i] = self._run_one(call)
             i += 1
         return [o for o in outputs if o is not None]
+
+    def _run_one(self, call) -> ToolOutput:
+        if call.name == "read" and self.context is not None:
+            note = self.context.doc_note(call.arguments.get("path"))
+            if note is not None:  # rule c: a doc that is already in the context
+                return ToolOutput("read", note, json.dumps(note), [], False)
+        return run_tool(self.ctx, call.name, call.arguments)
 
     def after_compile(self) -> dict[str, Any]:
         result = self.ctx.last_compile
@@ -323,7 +366,10 @@ class _Run:
     # -- one run --
 
     def run(self) -> RunResult:
-        self.add(System(SYSTEM_PROMPT.read_text(encoding="utf-8")))
+        system = SYSTEM_PROMPT.read_text(encoding="utf-8")
+        if self.lessons:
+            system += lessons_file.prompt_section()
+        self.add(System(system))
         self.add(System(QUICKSTART.read_text(encoding="utf-8")))
         self.add(User(f"Build this object: {self.prompt}\n\nThe workspace has a starter "
                       "main.py. Plan the bodies and joints first, then write main.py."))
@@ -339,6 +385,8 @@ class _Run:
             reason = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=5)}"
         if status != "success":
             reason = f"{reason}; {describe_best(best_build(self.run_dir))}"
+        if self.lessons:
+            lessons_file.learn(self.run_dir)
         record = self.record(status, reason)
         self.on_event({"kind": "end", "status": status, "reason": reason,
                        "run_dir": self.run_dir, "record": record})
@@ -347,12 +395,32 @@ class _Run:
 
     def loop(self) -> tuple[str, str]:
         while self.turn < self.max_turns:
+            elapsed = time.time() - self.started
+            if self.max_time_s is not None and elapsed > self.max_time_s:
+                return "time_exceeded", (f"stopped after {elapsed:.0f} s (the limit is "
+                                         f"{self.max_time_s:.0f} s)")
             self.turn += 1
+            sent = self.messages
+            if self.context is not None:
+                sent = self.context.view(self.messages, self.turn_of, self.turn,
+                                         extra_chars=self.tools_chars)
             metrics: dict[str, Any] = {"turn": self.turn,
-                                       "context_tokens_est": self.context_tokens()}
+                                       "context_tokens_est": self.context_tokens(sent),
+                                       "history_tokens_est": self.context_tokens(),
+                                       "sent_messages": len(sent)}
             self.per_turn.append(metrics)
+            options: dict[str, Any] = {}
+            last = self.ctx.last_compile
+            if self.effort is not None:
+                if last is not None and last.ok:
+                    options = {"effort": self.effort.routine_effort,
+                               "max_output_tokens": self.effort.routine_max_output_tokens}
+                    self.effort_turns["routine"] += 1
+                else:
+                    self.effort_turns["default"] += 1
+                metrics["effort"] = options.get("effort", "default")
             try:
-                reply = self.model.query(self.messages, self.tools)
+                reply = self.model.query(sent, self.tools, **options)
             except BudgetExceeded as exc:
                 if exc.reply is not None:  # paid for: keep it in the record
                     metrics.update(self.account(exc.reply))
@@ -369,8 +437,15 @@ class _Run:
                 outputs = self.run_calls(reply.tool_calls, reply.finish_reason == "length")
                 images: list[str] = []
                 compile_info = None
+                checkpoint = self.context is not None and self.context.config.checkpoints
+                compiled = False
                 for call, out in zip(reply.tool_calls, outputs, strict=True):
                     self.tool_counts[call.name] += 1
+                    if checkpoint and call.name == "compile" and not out.is_error:
+                        compiled = True  # rule a: the signals go in the checkpoint message
+                        data = {**out.data, "compile_signals": "[in the <checkpoint> message "
+                                                               "after these tool results]"}
+                        out = ToolOutput(out.name, data, json.dumps(data), out.images, False)
                     self.add(out.message(call.id))
                     event["tools"].append({"name": call.name, "args": call.arguments,
                                            "error": out.data.get("error_kind")
@@ -380,6 +455,10 @@ class _Run:
                     images += [str(p) for p in out.images]
                 if images and getattr(self.model, "supports_images", False):
                     self.add(User("Rendered views (front, side, top, iso).", tuple(images)))
+                if compiled:
+                    self.add(User(checkpoint_text(self.turn, self.ctx.last_compile)),
+                             checkpoint=True)
+                    self.context.checkpoint()
                 metrics["tools"] = [c.name for c in reply.tool_calls]
                 metrics["compile"] = compile_info
                 event["compile"] = compile_info
@@ -415,6 +494,8 @@ class _Run:
                                            f"times without a fresh passing compile: {blocker}")
             reminder = FINAL_RESPONSE_REQUIRED if blocker is None else compile_required(blocker)
             kind = "final_response_required" if blocker is None else "compile_required"
+            if not text and reply.finish_reason == "length":
+                reminder, kind = REPLY_CUT_OFF, "reply_cut_off"
             self.add(User(reminder), reminder=kind)
             metrics["reminder"] = kind
             event["reminder"] = kind
@@ -426,8 +507,15 @@ class _Run:
 def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *,
         run_dir: str | Path | None = None, runs_root: str | Path = RUNS_ROOT,
         compiler: Callable = compile_run,
-        on_event: Callable[[Event], None] | None = None) -> RunResult:
-    """Run the agent on ``prompt`` until it finishes with a checked build, or stops."""
+        on_event: Callable[[Event], None] | None = None,
+        context: ContextPolicy | None = None, effort: EffortPolicy | None = None,
+        max_time_s: float | None = MAX_TIME_S, lessons: bool = False) -> RunResult:
+    """Run the agent on ``prompt`` until it finishes with a checked build, or stops.
+
+    ``context``: the context policy (agent/context.py), or None to send the full history.
+    ``effort``: less reasoning on routine turns, or None for the model's settings.
+    ``max_time_s``: wall-clock budget (end state ``time_exceeded``). ``lessons``: use and
+    update runs/lessons.md (off by default)."""
     run_dir = Path(run_dir).resolve() if run_dir is not None else new_run_dir(prompt, runs_root)
     for sub in ("workspace", "result", "renders"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -441,7 +529,9 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         model.log = CallLog(run_dir)
     if getattr(model, "budget", budget) is not budget:
         raise ValueError("the model has a different Budget than the one given to run()")
-    return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event).run()
+    return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
+                max_time_s, lessons).run()
 
 
-__all__ = ["MAX_TURNS", "RunResult", "best_build", "new_run_dir", "run"]
+__all__ = ["MAX_TIME_S", "MAX_TURNS", "EffortPolicy", "RunResult", "best_build", "new_run_dir",
+           "run"]

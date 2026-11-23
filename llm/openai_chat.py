@@ -114,25 +114,29 @@ class OpenAIChatModel(ChatModelBase):
         self._create = create
         self._tools_cache: tuple[tuple[Tool, ...], list[dict[str, Any]]] | None = None
 
-    def request(self, messages: list[Message], tools: tuple[Tool, ...]) -> dict[str, Any]:
+    def request(self, messages: list[Message], tools: tuple[Tool, ...],
+                options: dict[str, Any] | None = None) -> dict[str, Any]:
         """The Chat Completions request. System messages first, then the conversation; the
         same tools convert to the same schemas, so the cacheable prefix stays identical."""
         body: dict[str, Any] = {
             "model": self.model,
             "messages": to_chat(messages, self.settings.reasoning_echo),
-            self.settings.token_param: self.max_output_tokens,
+            self.settings.token_param: (options or {}).get("max_output_tokens",
+                                                           self.max_output_tokens),
         }
         if tools:
             if self._tools_cache is None or self._tools_cache[0] != tools:
                 self._tools_cache = (tools, tools_to_chat(tools))
             body["tools"] = self._tools_cache[1]
-        if self.effort:
-            body["reasoning_effort"] = self.effort
+        effort = (options or {}).get("effort", self.effort)
+        if effort:
+            body["reasoning_effort"] = effort
         body["timeout"] = self.timeout_s
         return body
 
-    def _complete(self, messages: list[Message], tools: tuple[Tool, ...]) -> Completion:
-        body = self.request(messages, tools)
+    def _complete(self, messages: list[Message], tools: tuple[Tool, ...],
+                  options: dict[str, Any]) -> Completion:
+        body = self.request(messages, tools, options)
         try:
             response, retries = call_with_retries(lambda: self._create(**body), self.retry,
                                                   self.provider, self._sleep, self._jitter)

@@ -61,14 +61,20 @@ class ChatModelBase:
         self.model, self.budget, self.log, self.role = model, budget, log, role
         self._secrets: tuple[str, ...] = ()
 
-    def _complete(self, messages: list[Message], tools: tuple[Tool, ...]) -> Completion:
+    def _complete(self, messages: list[Message], tools: tuple[Tool, ...],
+                  options: dict[str, Any]) -> Completion:
         raise NotImplementedError
 
     def _cost(self, usage: Usage, at: datetime) -> Cost:
         return accounting.cost(self.model, usage, at)
 
-    def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = ()) -> Reply:
+    def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = (), *,
+              effort: str | None = None, max_output_tokens: int | None = None) -> Reply:
+        """One call. ``effort`` / ``max_output_tokens`` override the model's settings for
+        this call only (the loop lowers reasoning on routine turns)."""
         tools = tuple(tools)
+        options = {k: v for k, v in (("effort", effort),
+                                     ("max_output_tokens", max_output_tokens)) if v is not None}
         validate(messages, tools)
         if self.budget is not None:
             self.budget.before_call()
@@ -77,9 +83,9 @@ class ChatModelBase:
         base = {"time": at.isoformat(timespec="milliseconds"), "role": self.role,
                 "provider": self.provider, "model": self.model,
                 "prefix": prefix_digest(messages, tools), "messages": len(messages),
-                "tools": len(tools)}
+                "tools": len(tools), **({"options": options} if options else {})}
         try:
-            done = self._complete(messages, tools)
+            done = self._complete(messages, tools, options)
         except ProviderError as exc:
             self._log({**base, "status": "error", "latency_s": _since(started),
                        "retries": exc.attempts - 1, "http_status": exc.status,

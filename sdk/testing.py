@@ -313,6 +313,10 @@ class _Scene:
         return max(0.0, float(value))
 
 
+CollisionScene = _Scene
+"""Public name for the collision scene: the agent's probe tool poses builds with it."""
+
+
 # ---- the context ----------------------------------------------------------------------------
 
 

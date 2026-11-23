@@ -1,6 +1,6 @@
 """LLM configuration in one file: providers, model roles, prices, budgets and retries.
 
-Switch a role in one line, for example ``ROLES["builder"] = CHEAP``.
+Switch a role in one line, for example ``"builder": OPENAI_STRONG``.
 
 Model names and prices were checked on the providers' own pages on PRICES_CHECKED. Prices
 change; re-check them on the PRICE_SOURCES pages and update the date.
@@ -48,15 +48,20 @@ class Role:
 
 
 # OpenAI's docs: "If you're not sure where to start, use GPT-6.2 Astra, our flagship model
-# for complex reasoning and coding."
-STRONG = Role("openai", "gpt-6.2-astra")
-# DeepSeek's docs: "Use deepseek-flash as the model name" (served by DeepSeek-V4.1-Flash).
-CHEAP = Role("deepseek", "deepseek-flash")
+# for complex reasoning and coding." Kept for evaluation runs.
+OPENAI_STRONG = Role("openai", "gpt-6.2-astra")
+# DeepSeek's pricing page lists two models: deepseek-v4-pro (served by DeepSeek-V4-Pro) and
+# deepseek-flash ("Use deepseek-flash as the model name"; served by DeepSeek-V4.1-Flash).
+DEEPSEEK_PRO = Role("deepseek", "deepseek-v4-pro")
+DEEPSEEK_FLASH = Role("deepseek", "deepseek-flash")
 
+# Development: DeepSeek for both roles (cheap). For evaluation: "builder": OPENAI_STRONG.
 ROLES: dict[str, Role] = {
-    "builder": STRONG,
-    "cheap": CHEAP,
+    "builder": DEEPSEEK_PRO,
+    "cheap": DEEPSEEK_FLASH,
 }
+# The model scripts/llm_smoke.py uses for a provider that no role uses.
+REFERENCE_MODELS = {"openai": OPENAI_STRONG, "deepseek": DEEPSEEK_FLASH}
 
 # ---- prices -----------------------------------------------------------------------------------
 
@@ -114,8 +119,8 @@ PRICES: dict[str, Price] = {
 
 # ---- budget and retries -----------------------------------------------------------------------
 
-DEFAULT_MAX_COST_USD = 5.00  # per run
-DEFAULT_MAX_CALLS = 200  # per run
+DEFAULT_MAX_COST_USD = 1.00  # per run (development)
+DEFAULT_MAX_CALLS = 100  # per run
 
 
 @dataclass(frozen=True)

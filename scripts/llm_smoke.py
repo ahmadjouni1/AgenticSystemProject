@@ -5,7 +5,10 @@
     uv run python scripts/llm_smoke.py deepseek         # one provider
     uv run python scripts/llm_smoke.py --cache          # also show prompt caching at work
 
-Per provider (the model of the first role in llm/config.py ROLES that uses it):
+Keys come from the environment, or from replica/.env (git-ignored) for any not set.
+
+Per provider (the model of the first role in llm/config.py ROLES that uses it, else
+config.REFERENCE_MODELS):
 1. the model is asked to add 2 + 3 with the `add` tool and must call it;
 2. the tool result goes back and the model answers (this checks the tool loop, including
    DeepSeek's reasoning_content echo).
@@ -27,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from llm import (Budget, CallLog, LLMError, System, Tool, ToolResult, User,  # noqa: E402
-                 config)
+                 config, load_env)
 from llm.openai_chat import OpenAIChatModel  # noqa: E402
 
 ADD = Tool("add", "Add two integers and return the sum.", {
@@ -55,8 +58,7 @@ def smoke(provider_name: str, run_dir: Path, budget: Budget, cache: bool) -> boo
     role_name, role = next(((n, r) for n, r in config.ROLES.items()
                             if r.provider == provider_name), (None, None))
     if role is None:
-        print(f"{provider_name}: no role in llm/config.py uses it; skipped")
-        return True
+        role_name, role = "reference", config.REFERENCE_MODELS[provider_name]
     if not os.environ.get(provider.key_env):
         print(f"{provider_name}: skipped (set {provider.key_env})")
         return True
@@ -99,6 +101,7 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown provider(s) {unknown}; choose from {list(config.PROVIDERS)}")
     args.providers = args.providers or list(config.PROVIDERS)
+    load_env()  # replica/.env, without overriding variables already set
     run_dir = Path("runs") / "llm_smoke" / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     budget = Budget(max_cost_usd=0.50, max_calls=10)
     print(f"prices checked {config.PRICES_CHECKED}; log: {run_dir / CallLog.FILE}\n")

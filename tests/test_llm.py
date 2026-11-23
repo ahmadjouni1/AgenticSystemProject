@@ -151,8 +151,10 @@ def test_every_role_has_a_provider_and_a_price() -> None:
     for name, role in config.ROLES.items():
         assert role.provider in config.PROVIDERS, name
         assert role.model in config.PRICES, name
-    assert config.ROLES["builder"].provider == "openai"
-    assert config.ROLES["cheap"].provider == "deepseek"
+    assert config.ROLES["builder"].model == "deepseek-v4-pro"  # development setting
+    assert config.ROLES["cheap"].model == "deepseek-flash"
+    assert config.DEFAULT_MAX_COST_USD == 1.00 and config.DEFAULT_MAX_CALLS == 100
+    assert {"gpt-6.2-astra", "gpt-6.2-sol"} <= set(config.PRICES)  # kept for evaluation
     for price in config.PRICES.values():
         assert price.cached_input < price.input < price.output
 
@@ -478,3 +480,40 @@ def test_round_trip_through_the_openai_sdk_without_network(tmp_path) -> None:
     assert reply.usage == Usage(900, 640, 0, 40, 25)
     assert reply.raw["choices"][0]["message"]["reasoning_content"] == "Use add."
     assert "ds-test-key-0000" not in (tmp_path / "llm_calls.jsonl").read_text(encoding="utf-8")
+
+
+# ---- .env ---------------------------------------------------------------------------------------
+
+
+def test_env_file_is_loaded_without_overriding(tmp_path, monkeypatch) -> None:
+    from llm.env import load_env, parse_env
+
+    env = tmp_path / ".env"
+    env.write_text("\n".join([
+        "# keys", "export DEEPSEEK_API_KEY='ds-from-file'", "OPENAI_API_KEY=sk-file",
+        'QUOTED="a # not a comment"', "PLAIN=value  # comment", "not a line", "", ""]),
+        encoding="utf-8")
+    assert parse_env(env.read_text()) == {"DEEPSEEK_API_KEY": "ds-from-file",
+                                          "OPENAI_API_KEY": "sk-file",
+                                          "QUOTED": "a # not a comment", "PLAIN": "value"}
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-already-set")
+    for name in ("DEEPSEEK_API_KEY", "QUOTED", "PLAIN"):
+        monkeypatch.delenv(name, raising=False)
+    assert sorted(load_env(env)) == ["DEEPSEEK_API_KEY", "PLAIN", "QUOTED"]
+    import os
+    assert os.environ["OPENAI_API_KEY"] == "sk-already-set"  # the real environment wins
+    assert os.environ["DEEPSEEK_API_KEY"] == "ds-from-file"
+    assert load_env(tmp_path / "missing.env") == []
+
+
+def test_env_file_is_git_ignored() -> None:
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    root = Path(__file__).resolve().parents[1]
+    done = subprocess.run(["git", "check-ignore", ".env"], cwd=root, capture_output=True,
+                          text=True, check=False)
+    assert done.returncode == 0 and done.stdout.strip() == ".env"

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from llm import config
 from llm.accounting import Budget, CallLog, cost
+from llm.env import load_env
 from llm.messages import Assistant, Message, System, Tool, ToolCall, ToolResult, User
 from llm.protocol import UNKNOWN, BudgetExceeded, LLMError, Model, ProviderError, Reply, Usage
 from llm.scripted import ScriptedModel
@@ -21,9 +22,11 @@ from llm.scripted import ScriptedModel
 
 def get_model(role: str, *, run_dir: str | Path | None = None,
               budget: Budget | None = None) -> Model:
-    """The model configured for ``role`` in config.ROLES, logging to run_dir/llm_calls.jsonl."""
+    """The model configured for ``role`` in config.ROLES, logging to run_dir/llm_calls.jsonl.
+    Keys: the environment, then replica/.env for any that are not set."""
     from llm.openai_chat import OpenAIChatModel
 
+    load_env()
     if role not in config.ROLES:
         raise LLMError(f"unknown role {role!r}; roles: {sorted(config.ROLES)}")
     choice = config.ROLES[role]
@@ -37,4 +40,4 @@ def get_model(role: str, *, run_dir: str | Path | None = None,
 
 __all__ = ["UNKNOWN", "Assistant", "Budget", "BudgetExceeded", "CallLog", "LLMError", "Message",
            "Model", "ProviderError", "Reply", "ScriptedModel", "System", "Tool", "ToolCall",
-           "ToolResult", "Usage", "User", "config", "cost", "get_model"]
+           "ToolResult", "Usage", "User", "config", "cost", "get_model", "load_env"]

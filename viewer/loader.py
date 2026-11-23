@@ -1,8 +1,8 @@
 """Read a version folder (``model.json`` + ``model.glb``) back into a kinematic model.
 
 The rebuilt ``Assembly`` has the same bodies, joints, mimics and loop closures as the
-one that was exported. Each body's geometry is its merged mesh from the GLB, so the
-model can be solved, posed, or checked again.
+one that was exported. Each body's geometry comes from its GLB mesh, split into connected
+pieces (closed solids again), so the model can be solved, posed, or checked again.
 """
 
 from __future__ import annotations
@@ -57,8 +57,9 @@ def load_version(directory: str | Path) -> LoadedVersion:
     meshes = _glb_meshes(directory / GLB_FILE)
     assembly = Assembly(manifest["name"])
     for body in manifest["bodies"]:
-        mesh = meshes[body["name"]]
-        assembly.body(body["name"]).add("visual", MeshGeometry(mesh.vertices, mesh.faces))
+        added = assembly.body(body["name"])
+        for name, part in _pieces(meshes[body["name"]]):
+            added.add(name, MeshGeometry(part.vertices, part.faces))
     for joint in manifest["joints"]:
         parent = assembly.get_body(joint["parent"])
         child = assembly.get_body(joint["child"])
@@ -89,6 +90,18 @@ def _glb_meshes(path: Path) -> dict[str, trimesh.Trimesh]:
         _transform, geometry_name = scene.graph[node]
         meshes[node] = scene.geometry[geometry_name]
     return meshes
+
+
+def _pieces(mesh: trimesh.Trimesh) -> list[tuple[str, trimesh.Trimesh]]:
+    """A body's GLB mesh split back into its connected pieces.
+
+    The export merges a body's shapes into one mesh, which is not watertight where shapes
+    overlap; each piece of a closed shape is. Collision depth needs closed solids, so the
+    checks and the agent's probe get the pieces, as the original model had separate shapes."""
+    parts = mesh.split(only_watertight=False)
+    if len(parts) <= 1:
+        return [("visual", mesh)]
+    return [(f"piece{i}", part) for i, part in enumerate(parts, 1)]
 
 
 def _sliders(assembly: Assembly) -> tuple[list[dict[str, Any]], str]:

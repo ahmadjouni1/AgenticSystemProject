@@ -45,6 +45,12 @@ Articraft module):
   The shape of a model reply (text, tool calls, token usage, cost, raw provider content)
   and the retry count (4, exponential backoff), from articraft/agent/protocols.py and
   articraft/agent/provider/*. Rewritten.
+- agent/tools/
+  The tool design: a Tool with a name, schema, run(ctx, args) and a parallel flag; a
+  ToolContext; workspace path scoping; read with "L12:" line numbers and offset/limit;
+  edit with old_text/new_text that must match once, all or nothing; write; compile
+  returning the signal block, from articraft/agent/tools/*. Rewritten; render, probe,
+  structured errors and the output cap are new, and the shell tool was dropped.
 - docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
   A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
   source for commentary, and an inventory of its mesh helpers.

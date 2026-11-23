@@ -1374,3 +1374,285 @@ The smoke script exercises the first point. Its `--cache` option exercises cachi
 - **Price freshness check:** warn when `PRICES_CHECKED` is more than, say, 60 days old.
 - **Run storage (step 11)** will want to save the neutral messages; add `to_dict` /
   `from_dict` then.
+
+## Step 7: Agent tools
+
+### Before step 7: .env and development roles
+
+**`.env` loader** (`llm/env.py`, 50 lines). It is a tiny loader instead of python-dotenv,
+so there is no new dependency.
+- **Format:** `NAME=value`, plus `export NAME=...`, quoted values, blank lines and `#`
+  comments. Malformed lines are skipped silently: they are never echoed, since they may
+  hold a secret.
+- **No overriding:** a variable that is already set is never overridden; the real
+  environment wins.
+- **Where it runs:** `get_model()` and `scripts/llm_smoke.py` call `load_env()`.
+- **Git:** `git check-ignore -v .env` prints `.gitignore:7:.env .env`. A test runs that
+  check.
+- **Never logged:** `load_env` returns only the names it set and nothing prints values.
+  The call log holds no environment. The compiler already strips `*_API_KEY` / `*_TOKEN`
+  from the environment of model-written code, so keys from `.env` do not reach it.
+
+**Development roles** (`llm/config.py`):
+- `builder` = `deepseek-v4-pro` and `cheap` = `deepseek-flash`. Both models appear on
+  DeepSeek's pricing page (checked 2026-11-23).
+- The default budget is **$1 and 100 calls per run**.
+- The OpenAI rows stay in the price table, and `OPENAI_STRONG` (gpt-6.2-astra) stays defined
+  for evaluation runs.
+- `REFERENCE_MODELS` gives the smoke script a model for a provider that no role uses.
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `agent/tools/core.py` | 209 | `AgentTool`, `ToolContext`, `ToolError`, `ToolOutput`, path scoping, argument checking, output cap |
+| `agent/tools/__init__.py` | 70 | The registry: fixed order, `schemas()`, `run_tool()`, `schema_size()` |
+| `agent/tools/files.py` | 178 | `read`, `write`, `edit` |
+| `agent/tools/compile_tool.py` | 24 | `compile` |
+| `agent/tools/builds.py` | 130 | The newest build, loaded once and cached; pose checks; joint report |
+| `agent/tools/render.py` | 144 | `render`: CPU rasterizer (numpy + Pillow) |
+| `agent/tools/probe.py` | 151 | `probe`: positions, points, gaps and collisions at a pose |
+| `viewer/loader.py` | (changed) | Splits each body's GLB mesh into closed pieces (see below) |
+| `sdk/testing.py` | (changed) | `CollisionScene`, a public name for the check's collision scene |
+| `docs/sdk/README.md` | 3 | Placeholder for the SDK docs (step 10) |
+| `tests/test_agent_tools.py` | 323 | 26 tests, no LLM |
+| `scripts/tools_demo.py` | 52 | Calls each tool by hand on the laptop and the drawer and prints the JSON |
+
+Dependency: **pillow 13.0.0** is now declared. It was already installed through another
+package; rendering uses it directly.
+
+**The tool type.**
+
+```python
+@dataclass(frozen=True)
+class AgentTool:
+    name: str
+    description: str           # one line: what it does and when to use it
+    parameters: dict           # JSON Schema
+    run: Callable[[ToolContext, dict], dict]   # JSON-ready dict, or raise ToolError
+    parallel_ok: bool = False
+
+ctx = ToolContext(run_dir)                      # workspace = run_dir/workspace; compiler = compile
+out = run_tool(ctx, "probe", {...})             # never raises
+out.text                                        # JSON, at most 16,000 characters
+out.images                                      # PNG paths (render), for models that see images
+messages.append(out.message(call.id))           # -> llm.ToolResult
+```
+
+**The tools** (registry order, which is fixed for a stable cache prefix):
+
+| Tool | Arguments | Returns | Parallel |
+| --- | --- | --- | --- |
+| `read` | `path`, `offset?`, `limit?` (400 lines default, 2,000 max) | `{path, lines, total_lines, text: "L12: ...", next_offset?}`; a folder gives `{path, entries}` | yes |
+| `write` | `path`, `content` | `{path, created, bytes, lines}` | no |
+| `edit` | `path`, `edits[{old_text, new_text}]` | `{path, replaced, bytes, lines}` | no |
+| `compile` | none | `{status, version, cached, compile_signals}` | no |
+| `render` | `pose?`, `views?` (front, side, top, iso) | `{build, images[{view, path}], joints, bodies{min_m, max_m, size_mm}, overall_size_mm, note?}` | no |
+| `probe` | `pose?`, `queries[]` | `{build, joints, results[], note?}` | no |
+
+**Errors** always have one shape, `{"error_kind", "message", "hint"}`. The kinds:
+- `bad_arguments`: checked against the tool's schema before it runs;
+- `path_refused`, `not_found`, `not_text`, `too_large`;
+- `edit_failed`;
+- `no_build`, `bad_pose`, `pose_unreachable`;
+- `unknown_tool`;
+- `internal_error`: a tool bug, with the file and line.
+
+A failed compile is not a tool error: `compile` returns `status: "error"` and the signal
+block.
+
+**Rules.**
+- **Paths.** A path is relative to the workspace, or `docs/sdk/...`, which is read-only.
+  These are refused: absolute paths (`/etc/passwd`, `C:\...`, `C:main.py`, UNC paths), any
+  `..`, and anything that resolves outside the allowed folder (symlinks included). Writing
+  or editing under `docs/sdk/` is refused too.
+- **No shell tool.** Articraft's `exec_command` is a full shell. Here the model gets file
+  access through `read`/`write`/`edit`, and looks at the model through `render`/`probe`.
+- **Output cap.** Each result is at most 16,000 characters, about 4k tokens. The longest
+  string field is cut to its head (2/3) + tail (1/3), with a note: "[... N characters of
+  text omitted (head and tail shown); read a smaller range with offset/limit ...]".
+- **Schema size.** 3,054 characters as sent in Chat Completions JSON, **about 764 tokens**.
+  That is an estimate at 4 characters per token, because no tokenizer is installed. Per
+  tool, in characters: read 467, write 344, edit 546, compile 275, render 527, probe 883.
+
+**`read`**
+- Line-numbered (`L12: ...`).
+- Long lines are cut at 1,000 characters.
+- Gives `next_offset` when there is more to read.
+- Lists a folder: hidden files and `__pycache__` are left out.
+- A non-UTF-8 file gives `not_text`.
+
+**`write`**
+- Creates parent folders.
+- Content is capped at 400,000 characters.
+- Writes UTF-8 with LF line endings.
+
+**`edit`**
+- Edits apply in order, and each `old_text` must match exactly once.
+- If any edit fails, nothing is written, and the error names it: `edit 2 of 2: old_text
+  was not found in main.py; nothing was changed`.
+- No match: the hint looks for a whitespace-insensitive match ("it matches at line 1 if
+  whitespace is ignored; copy the exact indentation ...").
+- Several matches: the error lists the lines ("matches 2 times (lines 4, 5)") and asks for
+  more surrounding lines.
+
+**`compile`**
+- Calls `ctx.compiler(run_dir)` (step 3) and returns only status, version, cached and the
+  `<compile_signals>` block.
+- The compiler's own cache answers when nothing changed (`cached: true`).
+- The result is kept in `ctx.last_compile`, so render and probe can say when the build is
+  older than `main.py`.
+
+**The newest build** (shared by render and probe):
+- `result/last_failed` if it exists. It exists only when the latest compile failed its
+  checks; every compile removes it first.
+- Otherwise the latest `result/vNNNN`.
+- A note says which one was used. Two cases:
+  - "the latest compile failed its checks; this is the model it built";
+  - "the latest compile failed before a model was built; this is the last good build,
+    v0002, which is older than main.py".
+- Builds are loaded once per folder (manifest mtime) with step 5's loader, and cached in
+  the context.
+- Poses: only driven joints may be set. Anything else is refused with the list of driven
+  joints and their ranges ("joint 'rocker_joint' is moved by a mimic or loop and cannot be
+  set").
+- Out-of-limit values give `bad_pose`. A loop that cannot close gives `pose_unreachable`.
+
+**`render`**
+- **CPU only**, with numpy + Pillow, 640×480 per view.
+- **Views:** orthographic front (looking +Y), side (−X), top (−Z) and iso.
+- **Drawing:** flat Lambert shading with a light from the upper side of the camera;
+  painter's algorithm (triangles drawn far to near); 2× supersampling.
+- **Colours:** the viewer's palette, which has no reds. Each image has a legend and a
+  view label.
+- **Back-face culling on closed bodies.** Without it, the painter's algorithm drew hidden
+  faces over visible ones on big two-triangle box faces: dark slivers on the laptop deck,
+  and the lid's back showing through. Open meshes are still drawn two-sided.
+- **Files:** PNGs go to `run_dir/renders/NNNN/<view>.png`. The JSON gives their paths and
+  each body's world bounding box, so a text-only model can still use the result.
+  `ToolOutput.images` carries the files for a model that accepts images (step 8).
+- **Speed:** about 0.2 s for 4 views of the desk lamp (3,164 triangles).
+
+**`probe`**
+- **Queries:**
+  - `position{body}`: origin in m and rpy in degrees, in the SDK's convention;
+  - `point{body, point}`: a body-frame point in world coordinates (a tool tip, a handle);
+  - `gap{a, b}`: `apart` / `touching` / `penetrating`, with `gap_mm`, and `depth_mm` if
+    they overlap;
+  - `collisions{}`: every interpenetrating pair, with depth, volume, and whether it is
+    over the check tolerance.
+- **Joints:** every moving joint's solved value is always returned, in rad and deg, or m.
+- **Loops** go through `assembly.solve`, with the walking warm start.
+- **Collisions** use the same scene as the checks: AABB pre-check, then fcl, then manifold
+  depth. The tolerance is the check's `max(0.2 mm, 0.002 × size)`.
+
+**A false collision, found by the probe.** On the four-bar at crank 60° (which passes every
+check), the first probe reported `coupler`/`rocker` 5.0 mm deep with zero volume.
+- **Cause:** the export merges a body's shapes into one GLB mesh. Where the shapes overlap
+  (a bar and its pivot), the merged mesh is not watertight. So the depth fell back to fcl's
+  contact estimate, which is unreliable for meshes.
+- **Fix:** the loader splits each body's mesh into its connected pieces. Each piece is a
+  closed solid again, as in the original model, so the manifold depth works. The probe now
+  agrees with the checks: no collisions, and coupler/rocker `touching`.
+
+The viewer's poses are unaffected; its tests still pass.
+
+### Tests (26; 25 pass, 1 skipped on this machine)
+
+- **Registry:**
+  - the fixed order and identical schemas on every call;
+  - no shell-like tool;
+  - one-line descriptions under 170 characters;
+  - only `read` parallel;
+  - schema size under 1,000 estimated tokens. It is 764.
+- **Arguments:**
+  - a missing field, a wrong type, an unknown field, an unknown tool, and a non-object;
+  - a tool bug becomes `internal_error`.
+- **Output cap:** the head and tail are kept, the note is there, and the JSON is still
+  valid.
+- **Paths:** 7 escapes (`../`, `a/../../`, `docs/sdk/../../`, `/etc/passwd`, `C:\...`,
+  `C:main.py`, UNC) are refused by read, write and edit alike.
+  - The symlink escape test is skipped here: Windows without developer mode cannot create
+    symlinks.
+  - `docs/sdk` can be listed and read, but write and edit there are refused.
+- **read / write:** line numbers, offset/limit, `next_offset`, folder listing, missing file,
+  binary file, offset past the end, a capped 2,000-line read.
+- **edit:**
+  - several edits applied together;
+  - no match, with the whitespace hint;
+  - all or nothing: edit 1 is not applied when edit 2 fails;
+  - multi-match with line numbers, empty old_text, missing file.
+- **compile:**
+  - a broken `main.py` (syntax error) gives `status: error` and a `<compile_signals>` block
+    naming main.py;
+  - the second call is `cached: true`;
+  - the four-bar compiles to v0000.
+- **render:**
+  - the laptop with the lid at 1.2 rad gives 4 PNGs of 640×480, each with more than 50
+    colours (shaded, not blank);
+  - bounding boxes and the joint report;
+  - the next render goes to `renders/0002`;
+  - a bad view name is refused;
+  - render and probe without a build give `no_build`.
+- **probe:**
+  - the four-bar at crank 60°: `rocker_joint` = −0.083705 rad (−4.796°), matching
+    `assembly.solve()` within 1e-5 rad; the rocker origin and a coupler point match the
+    solved transforms; no collisions;
+  - **the drawer at 270 mm:** `last_failed` is used, with its note; `cabinet`/`drawer` are
+    10.0 mm deep (tolerance 1.337 mm); the gap query agrees; at 100 mm there is no
+    collision;
+  - bad input: an unknown body, a missing field, a 2-element point, a loop member set
+    directly, an unknown joint, empty queries;
+  - an unreachable loop pose gives `pose_unreachable` ("loop closure 'pin' ..."), and a
+    reachable one still works afterwards.
+
+**300 tests pass, 1 skipped.**
+
+Example probe result (four-bar, crank 60°):
+
+```json
+{"build": "v0000",
+ "joints": {"crank_joint": {"rad": 1.047198, "deg": 60.0},
+            "rocker_joint": {"rad": -0.083705, "deg": -4.796},
+            "coupler_joint": {"rad": -1.412386, "deg": -80.924},
+            "pin": {"rad": 0.281483, "deg": 16.128}},
+ "results": [{"type": "position", "body": "rocker", "origin_m": [0.1, 0.0, 0.0],
+              "rpy_deg": [0.0, -0.0, -4.796]},
+             {"type": "point", "body": "coupler", "local_m": [0.05, 0.0, 0.0],
+              "world_m": [0.058699, 0.050279, 0.0]},
+             {"type": "collisions", "pairs": [], "tolerance_mm": 0.328}]}
+```
+
+### How Articraft does it (study §7)
+
+- **Files:** `agent/tools/` has a registry, `_core.py` (`Tool`, `ToolContext`, path
+  scoping), one module per tool, and `_exec.py`.
+- **Tools:** `read` ‖, `view_image` ‖, `edit`, `write`, `exec_command` and `write_stdin`
+  (a full login shell with sessions), `compile`, and `synthesize_trajectory`.
+- **Errors** come back as a bare `{"error": str}`.
+- **Previews:** the model renders them itself, by running Python through `exec_command`.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| No shell tool | A shell gives model-written commands the user's full permissions. Every legitimate use here (inspect files, render, measure) has a narrow tool |
+| `render` and `probe` as tools | The model can look at and measure the object without writing preview scripts. `probe` answers motion questions (where is the tip at 60°? do these collide at 270 mm?) without a compile |
+| Structured errors `{error_kind, message, hint}` | The model can branch on the kind and act on the hint. A bare string is easy to ignore |
+| Arguments checked against the schema before running | Bad calls fail with a clear message instead of a Python traceback |
+| `edit` errors name the edit, the lines, and a whitespace-insensitive near miss | Most failed edits are whitespace or duplicate matches; the hint says which |
+| Head + tail output cap with a note | The end of a file or log is often what matters; the note says how to read the rest |
+| Fixed registry order | The tool schemas are part of the cached prompt prefix |
+
+### Open ideas
+
+- **Images to the model (step 8):** attach `ToolOutput.images` as image parts for models
+  that accept them. DeepSeek models are text-only through Chat Completions here, so the
+  bounding-box summary carries the information.
+- **Probe sweeps:** a `sweep{joint, from, to, steps}` query giving the minimum gap or the
+  first contact over a range. It is the checks' bisection, offered to the model.
+- **Render highlights:** paint colliding bodies red at the render pose, like the viewer.
+- **Exact token counts:** a tokenizer (it would need approval) would replace the
+  4-characters-per-token estimate.
+- **Parallel execution:** the loop (step 8) can run consecutive `read` calls concurrently.
+  Probe and render share a cached scene, so they stay sequential.

@@ -648,3 +648,249 @@ limits; or at least a memory cap.
   close to the kill; the margin is `min(1 s, 20% of the timeout)`.
 - **Warnings channel:** step 4's baseline checks will produce non-blocking `warning`
   signals; the renderer already has a section for them.
+
+---
+
+## Step 4: Checks
+
+### What was built
+
+| File | Lines | What it does |
+| --- | --- | --- |
+| `sdk/testing.py` | 908 | `CheckConfig`, `TestContext` (the `run_tests(ctx)` API), `run_checks` (baseline checks), and the collision scene on python-fcl and manifold3d |
+| `compiler/worker.py`, `compiler/feedback.py` | (changed) | `run_tests(ctx)`, then baseline checks, then export only if nothing blocks; 9 new signal kinds; allowances shown with their reasons |
+| `tests/check_fixtures.py`, `tests/test_checks.py` | 145 + 252 | Broken fixtures with known defects; 28 tests |
+| `scripts/time_checks.py` | 51 | The timing table below |
+
+New dependency: **python-fcl 0.7.0.11** (approved), used through trimesh's `CollisionManager`.
+
+**The authored API.** `run_tests(ctx)` gets a `TestContext`. The old zero-argument
+`run_tests()` still works.
+- **Expectations:** `expect_contact`, `expect_gap(min, max)`, `expect_distance` (between two
+  body-local points), `expect_no_collision_at_poses`, plus `check` and `fail`. They record
+  findings instead of raising, and a failed expectation blocks the compile.
+- **Sampling:** `sample_joint` and `track_point`.
+- **Allowances:** `allow_overlap(a, b, reason, shape_a=, shape_b=)` and
+  `allow_isolated(body, reason)`. A reason is required (blank is a `ValidationError`), and it
+  appears in the report and in the `<compile_signals>` block as
+  `(allowed: <reason>)`. An allowance that nothing used becomes a warning.
+
+**Baseline checks** (`run_checks`, which always runs). The tolerances are
+`max(floor, fraction × size)`, where size is the diagonal of the rest-pose bounding box.
+
+| Check | Rule | Threshold (`CheckConfig` defaults) | Blocks? |
+| --- | --- | --- | --- |
+| model validity | `validate()` (step 1) | - | yes |
+| mesh health | non-manifold edges; inconsistent or inside-out winding | - | yes |
+| mesh health | degenerate triangles; tiny debris; open boundary | area < 1e-10 × size²; piece < 2% of the shape | warning |
+| overlap at rest | two bodies interpenetrate | depth > max(0.2 mm, 0.002 × size) | yes, unless allowed |
+| floating parts | the contact graph from the root does not reach a body | contact = gap ≤ max(0.1 mm, 0.001 × size) | yes, unless allowed |
+| swept collision | each drivable joint (revolute **and** prismatic) is swept over its range, at 15° or 5% of size steps, 5-25 samples | depth > max(0.2 mm, 0.002 × size); 6 bisection steps | yes, unless allowed |
+| loop reach | the loop cannot close for some driver value inside its limits | solver error > 1e-6 | yes |
+| joint separation | a hinge's parent-child gap grows over its range | growth > max(0.5 mm, 0.005 × size) | yes |
+| islands | shapes of one body do not touch | contact tolerance | warning |
+| dimensions | a shape is larger than 50 m, or more than 100× the median shape | - | warning |
+
+**The sweep:**
+- **What gets swept.** Every drivable tree joint. Mimic joints follow their source. Of the
+  joints on a loop, only the first one authored is swept; the loop solver poses the rest
+  with the walking warm start. An unlimited revolute is swept over ±180°; an unlimited
+  prismatic gets a warning asking for limits.
+- **Refinement.** Coarse samples first. Where the collision state changes between two
+  samples, bisect to locate it. Where bodies that were apart at rest come within 2% of size,
+  add quarter-step samples.
+- **Reporting.** Each colliding pair reports:
+  - its **first contact**: a bisection on any interpenetration at all, from the rest pose
+    outward;
+  - the range where it is deeper than the tolerance;
+  - the deepest penetration and where it happens.
+
+**Collision pipeline:**
+1. An AABB pre-check (numpy) keeps only shape pairs from different bodies whose world boxes
+   overlap, at least one of which moved.
+2. trimesh `CollisionManager.in_collision_internal` (fcl BVH) confirms which pairs touch.
+3. manifold3d intersects each touching pair. The thinnest side of the intersection's box
+   is the penetration in mm, and its volume is reported too. Faces that only touch give an
+   empty intersection, so contact is not an overlap.
+4. Gaps come from `fcl.distance` between bodies.
+
+**Every finding becomes a `CompileSignal`.** It names the bodies and shapes, the pose (joint
+values), and the amount (mm of penetration, gap, or gap growth). Its location is the
+`main.py` line of the joint (for sweep, loop and separation findings) or of the first named
+body. Blocking findings are failures, allowed findings are notes, and the rest are warnings.
+
+**The drawer fixture, as the model sees it:**
+
+```text
+<compile_signals>
+<summary>
+status=error failures=1 warnings=0
+Primary issue: [swept_collision] at main.py:15: 'cabinet'/lip hits 'drawer'/back while 'slide' moves: first contact at 260.0 mm, deeper than 1.34 mm at 261.5 mm to 280.0 mm (deepest 20.00 mm at 280.0 mm)
+</summary>
+
+<failures>
+Failures (blocking):
+- FAILURE [swept_collision] 'cabinet'/lip hits 'drawer'/back while 'slide' moves: first contact at 260.0 mm, deeper than 1.34 mm at 261.5 mm to 280.0 mm (deepest 20.00 mm at 280.0 mm)
+  at main.py:15: cabinet.joint("slide", "prismatic", body.at((0, 0, 0)), drawer.at(), axis=(0, 1, 0),
+  fix: Change the joint limits, axis or geometry so the parts clear each other over the whole range.
+</failures>
+
+<response_rules>
+Suggested next steps:
+- Check failures are design evidence: fix the geometry, joint origin, axis or limits. Use allow_* only for real, intended contact, with a concrete reason.
+</response_rules>
+</compile_signals>
+```
+
+**Timing** (median of 3, `scripts/time_checks.py`; building the example is not counted):
+
+| Example | Triangles | Joints | Mesh, dims, islands | Rest checks | Sweeps | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| laptop | 48 | 1 | 0.003 s | 0.001 s | 0.002 s | 0.014 s |
+| four_bar | 864 | 4 | 0.006 s | 0.003 s | 0.249 s | 0.275 s |
+| gantry | 120 | 6 | 0.006 s | 0.002 s | 0.113 s | 0.135 s |
+| toaster | 16,684 | 2 | 0.038 s | 0.003 s | 0.029 s | 0.273 s |
+| door_hinge | 2,336 | 1 | 0.010 s | 0.002 s | 0.015 s | 0.102 s |
+| desk_lamp | 2,460 | 2 | 0.007 s | 0.004 s | 0.099 s | 0.143 s |
+| computer_mouse | 2,496 | 3 | 0.007 s | 0.002 s | 0.126 s | 0.170 s |
+| folding_chair | 16,064 | 2 | 0.034 s | 0.001 s | 0.016 s | 0.227 s |
+| **all 8** | | | | | | **1.34 s** (target < 2 s) |
+
+The totals include building the fcl BVHs and manifold solids (about 0.2 s for the two
+16k-triangle models). The four-bar's sweep is the slowest, because every sample is a loop
+solve.
+
+**Verified:** 217 tests pass in about 52 s. They show that:
+- the **lid placed inside the base** is an overlap of 5.00 mm at rest (`base/deck`, `lid/panel`);
+- the **floating knob** is reported 10.00 mm from the panel;
+- the **door hits its frame** with first contact at 90.0°, and is clean when limited to 89°;
+- the **drawer** (prismatic) first touches at 260.0 mm, the construction value, and is 20 mm deep at full extension;
+- the **hinge on the wrong axis** pulls the lid off: the gap grows 128 mm;
+- the **four-bar whose links cross** has its crank hit the rocker, with first contact near -12° of crank angle, posed by the loop solver, and no overlap at rest;
+- a non-Grashof four-bar is a loop failure;
+- `allow_overlap` with a reason passes and the reason is shown; a shape-level allowance does not cover other shapes;
+- at **2 cm vs 2 m**, the same 0.5 mm gap is floating on the small part and contact on the large one, and the same 1 mm sink is an overlap on the small part and fine on the large one;
+- **all 8 examples have no blocking findings**, and every allowance they declare is used;
+- in compiler tests, the drawer `main.py` fails with the signal above and writes no version, and an allowed overlap compiles and shows `(allowed: …)`.
+
+### The checks found real bugs, all fixed
+
+**In the examples** (the swept and floating checks found every one):
+
+| Example | Finding | Fix |
+| --- | --- | --- |
+| laptop | the screen sat 1 mm *below* the lid, inside the deck; the hinge barrel overlapped the lid by 4 mm | screen inlaid in the panel; barrel removed |
+| four_bar | the rocker rod (r = 5 mm) overlapped the coupler by 3 mm | r = 2 mm, in the crank's layer |
+| gantry | the tool head hit both carriages beyond ±314 mm | head travel ±300 mm; end frames make the base one piece |
+| toaster | the lever floated 4 mm off the face | lever against the face |
+| door_hinge | the leaves collided beyond 155° | limit 150° |
+| desk_lamp | the shade hit the arm when tilted up past 8.6° | tilt range -0.6 to 0.1 rad; the tube in the socket is allowed, with a reason |
+| computer_mouse | the wheel overlapped the shell and both buttons | a slimmer wheel; the shell slot is allowed |
+| folding_chair | the rear frame floated (its pivot lay in the tube's filleted bend); the seat hit the back slat at -33° | taller rear frame, smaller fillets, frames side by side; fold limit -0.55 rad; slat on the legs |
+
+**In the step 1 solver.** Sweeping a Grashof four-bar reported "cannot reach" at crank angles
+it can reach. The cause: SciPy's `trf` sizes its first trust region from the norm of the
+starting point, so a warm start like `[0, 4.4e-16]` got a 4e-16 trust region and stopped at
+once (`ftol`). The fix in `kinematics._least_squares`:
+- solve for the *offset* from the warm start, which always begins at exactly 0, so SciPy
+  starts with a proper trust region;
+- `x_scale=0.1` keeps that first step about 6° or 10 cm, so a rough guess does not jump to
+  the other branch. The existing warm-start test caught that jump when only the offset fix
+  was in place.
+
+The loop-reach message now lists the unreachable intervals instead of first-to-last.
+
+### How Articraft does it (study §4)
+
+- **Authored checks:** `sdk/testing.py::TestContext` provides `expect_*` (distance, contact,
+  gap, within, overlap, coaxial, ...), `sample_dof` and `track_point`, plus
+  `allow_overlap(part_a, part_b, reason, shape_a, shape_b)`, `allow_isolated_part` and
+  `allow_mesh_issues`.
+- **Baseline checks:** `compiler/worker.py::_run_baseline_tests` runs them, using
+  `_collision.py` (python-fcl BVH plus manifold intersection volume). Fixed absolute
+  tolerances: contact 1e-6 m, overlap 5 mm and 5e-7 m³, hinge gap growth 3 mm.
+- **Separation:** `fail_if_articulation_separates_child` samples revolute joints at 4 values.
+  **Prismatic joints are exempt.** There is no swept collision check at all: collisions are
+  checked only at rest.
+- **Only three kinds block:** model validity, mesh health and missing mass. Overlap, floating
+  parts and separation are diagnostics; the model is told to decide.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| Overlap, floating parts, swept collision, separation and loop reach **block** unless allowed with a reason | Diagnostics the model may ignore end up as broken objects (a lid that sinks into its base, a door through its frame). An explicit allowance with a reason keeps intentional cases possible and visible. |
+| Swept collision over every drivable joint, **prismatic included**, coarse then adaptive | Collisions that happen only in motion were invisible in Articraft. The drawer and the door are typical cases. |
+| First contact found by bisection, separately from the "deeper than tolerance" range | The door's scaled tolerance (5.3 mm) is first exceeded at 97.7°, but the useful fact for a fix is first contact at 90.0°. |
+| Loops are swept through their driver with the walking solver; an unreachable pose is a failure | Wrong link lengths or limits show up as a "cannot close" finding with the crank angles. |
+| Scale-relative tolerances, `max(floor, fraction × size)`, all in one `CheckConfig` | Articraft's 5 mm overlap tolerance accepts half of a 2 cm part; for a 2 m part, 1e-6 m contact is absurdly strict. |
+| Shape-level allowances, and unused allowances flagged | An allowance covers exactly what it says, and stale ones get cleaned up. |
+| Penetration as the thinnest side of the manifold intersection, in mm | The model gets an amount it can act on ("20 mm at 280 mm"), not only a volume. |
+
+### Open ideas
+
+- **Faster loop sweeps:** step the solver along the sweep values directly (continuation)
+  instead of repeating the full walk for each refinement point.
+- **Sweeps of joint combinations:** joints are swept one at a time with the others at rest.
+  Two joints that collide only together (a lid open *and* a drawer out) are missed; sample
+  a few corner combinations of the limits.
+- **Better depth:** the thinnest side of the intersection box overestimates the depth of a
+  slanted wedge. A signed-distance query, or the smallest translation that separates the
+  pair, would be exact.
+- **Clearance requirements:** let `allow_*` and the sweeps take a minimum clearance (for
+  example 2 mm between a drawer and its frame) instead of only "no penetration".
+- **Mass check:** add missing or zero mass when a physics step comes (Articraft blocks on it
+  with physics enabled).
+- **Mesh repair hints:** say which source operation produced a bad mesh, as Articraft does
+  with its mesh-health bounds.
+
+### Step 4b: allowance audit and combined poses
+
+**Allowance audit.** The 8 examples declared two allowances, and on inspection both hid
+real defects. Both are now fixed in geometry, and **no example declares an allowance any
+more**.
+
+| Example | Body pair | Reason it gave | Verdict | Fix |
+| --- | --- | --- | --- | --- |
+| desk_lamp | `arm/tube` and `head/socket` | "the arm tube is pushed into the lamp socket" | defect: the socket belongs to the moving head, so it would rotate through the tube | a hinge barrel on the arm along the tilt axis; the head's stem top is tangent to it; the tube's last stretch is level. Tilt range back to -0.6 to 0.4 rad, checked clean |
+| computer_mouse | `shell/body` and `wheel/tyre` | "the scroll wheel sits in a slot through the shell" | defect: there was no slot, so the wheel sat inside solid shell | `boolean_difference` cuts the slot; the wheel gets an axle whose ends bear on the slot walls |
+
+The new `run_tests(ctx)` of both examples asserts the real contacts: the stem on the barrel
+at rest and at -0.6 rad, and the axle on the slot walls.
+
+**A false overlap.** The mouse fix showed a flaw in the depth measure: "overlap 2.89 mm" with
+a volume of 2e-19 cm³. The axle's two ends touch the two slot walls, so the intersection is
+two zero-volume discs 4 mm apart, and their joint box looked 2.9 mm thick. The depth is now
+the maximum over the intersection's separate pieces (`Manifold.decompose`), ignoring pieces
+smaller than 1e-15 m³.
+
+**Combined poses** (`check: combined_collision`, signal kind `swept_collision`). After the
+single-joint sweeps, the checker poses the model with:
+- every driver at its range corners together, in Gray-code order (one joint changes per
+  step, which keeps the walking solver on its branch). Above 64 corners, a seeded sample of
+  64;
+- plus 20 seeded random poses.
+
+Only pairs not already reported by a single-joint sweep are reported, with the full pose,
+for example `left_arm_swing=60.0 deg, right_arm_swing=60.0 deg`. Models with fewer than two
+drivers skip this (the single sweep covered every pose). `max_corners`, `random_poses` and
+`random_seed` are in `CheckConfig`.
+
+New fixture: two arms that swing toward each other. Either arm alone is clear, and both at
+full swing cross by 20 mm. The test also checks the Gray-code order and the 64-corner cap.
+
+**Timing** with combined poses (median of 3):
+
+| Example | Triangles | Joints | Mesh, dims, islands | Rest | Sweeps | Combined | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| laptop | 48 | 1 | 0.003 s | 0.001 s | 0.002 s | 0.000 s | 0.011 s |
+| four_bar | 864 | 4 | 0.008 s | 0.002 s | 0.239 s | 0.000 s | 0.266 s |
+| gantry | 120 | 6 | 0.006 s | 0.002 s | 0.110 s | 0.042 s | 0.174 s |
+| toaster | 16,684 | 2 | 0.040 s | 0.003 s | 0.030 s | 0.038 s | 0.309 s |
+| door_hinge | 2,336 | 1 | 0.010 s | 0.002 s | 0.015 s | 0.000 s | 0.104 s |
+| desk_lamp | 3,164 | 2 | 0.018 s | 0.006 s | 0.109 s | 0.095 s | 0.287 s |
+| computer_mouse | 2,598 | 3 | 0.011 s | 0.003 s | 0.261 s | 0.050 s | 0.376 s |
+| folding_chair | 16,064 | 2 | 0.048 s | 0.002 s | 0.025 s | 0.000 s | 0.367 s |
+| **all 8** | | | | | | | **1.89 s** (budget < 3 s; 1.9-2.3 s across runs) |
+
+219 tests pass.

@@ -317,6 +317,39 @@ def test_a_version_written_during_a_failed_compile_is_removed(tmp_path: Path) ->
     assert result.status == "error" and versions(run_dir) == []
 
 
+def test_baseline_check_failure_blocks_export(tmp_path: Path) -> None:
+    from check_fixtures import DRAWER_SOURCE
+
+    run_dir = make_run(tmp_path, DRAWER_SOURCE)
+    result = compile(run_dir, timeout=TIMEOUT)
+    assert result.status == "error" and versions(run_dir) == []
+    (signal,) = [s for s in result.signals if s.severity == "failure"]
+    assert signal.kind == SignalKind.SWEPT_COLLISION
+    assert "first contact at 260.0 mm" in signal.message
+    assert signal.source.startswith('cabinet.joint("slide"')  # pointed at the joint
+    assert "Check failures are design evidence" in result.signals_text
+
+
+def test_allowances_pass_and_show_their_reason(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, """
+        import check_fixtures
+
+        object_model = check_fixtures.laptop(lid_sink=0.005)
+
+
+        def run_tests(ctx):
+            ctx.allow_overlap("base", "lid", reason="the lid is recessed into the deck")
+            ctx.expect_contact("base", "lid")
+        """)
+    (run_dir / "workspace" / "check_fixtures.py").write_text(
+        (Path(__file__).parent / "check_fixtures.py").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    result = compile(run_dir, timeout=TIMEOUT)
+    assert result.ok, result.signals_text
+    assert "allowed=1" in result.signals_text
+    assert "(allowed: the lid is recessed into the deck)" in result.signals_text
+
+
 def test_failed_tests_block_export_until_fixed(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, FAILURES["test_assert"][0])
     assert compile(run_dir, timeout=TIMEOUT).status == "error"

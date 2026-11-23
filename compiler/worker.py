@@ -9,9 +9,11 @@ The phases are:
 1. load ``workspace/main.py`` (runpy);
 2. get ``object_model``;
 3. validate it;
-4. run ``run_tests()`` if it is defined;
-5. baseline checks (a stub until step 4);
-6. export to ``result/vNNNN`` with ``main.py`` as the source snapshot.
+4. run ``run_tests(ctx)`` if it is defined (``ctx`` is an ``sdk.testing.TestContext``:
+   expectations and ``allow_*`` with reasons);
+5. baseline checks (``sdk.testing.run_checks``), using the allowances from ``ctx``;
+6. export to ``result/vNNNN`` with ``main.py`` as the source snapshot, but only if
+   nothing blocks.
 
 Prints ONE JSON payload as the last line of stdout. Anything main.py prints is captured
 into the payload instead.
@@ -20,8 +22,9 @@ into the payload instead.
 timeout, ``faulthandler`` dumps every thread's stack to ``result/.compile-hang.txt``, so
 the runner can say which line of main.py was running when it had to kill the process.
 
-``run_tests()`` passes if it returns None or True. It fails if it raises
-``AssertionError``, returns False, or returns a non-empty list of failure messages.
+``run_tests`` may also take no argument (step-3 style). Its failed expectations block the
+compile. Raising ``AssertionError``, returning False, or returning a non-empty list of
+messages also count as failures.
 """
 
 from __future__ import annotations
@@ -92,12 +95,6 @@ class Progress:
         os.replace(temporary, self.path)
 
 
-def baseline_checks(model: Any) -> list[CompileSignal]:
-    """Compiler-owned checks (collisions, floating parts, ...). Step 4 fills this in."""
-    del model
-    return []
-
-
 def compile_workspace(run_dir: Path) -> dict[str, Any]:
     workspace, result_dir = run_dir / "workspace", run_dir / "result"
     main_path = workspace / "main.py"
@@ -139,6 +136,7 @@ def compile_workspace(run_dir: Path) -> dict[str, Any]:
 def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Progress):
     from sdk import Assembly
     from sdk.export import export
+    from sdk.testing import TestContext, call_run_tests, run_checks
 
     with progress.phase_named("loading main.py"):
         namespace = runpy.run_path(str(main_path), run_name="__main__")
@@ -150,15 +148,17 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
         art = model.validate()
     model_info = {"name": model.name, "bodies": len(model.bodies), "joints": len(model.joints),
                   "closures": len(art.closures), "mimics": len(art.mimic_order)}
+    ctx = TestContext(model)
+    signals: list[CompileSignal] = []
     run_tests = namespace.get("run_tests")
     if callable(run_tests):
         with progress.phase_named(feedback.TESTS_PHASE):
-            outcome = run_tests()
-        failures = _test_failures(outcome)
-        if failures:
-            return feedback.signal_test_failures(failures, workspace), None, model_info
-    with progress.phase_named("running baseline checks"):
-        signals = baseline_checks(model)
+            outcome = call_run_tests(run_tests, ctx)
+        signals += feedback.signal_test_failures(_test_failures(outcome), workspace)
+    with progress.phase_named(feedback.CHECKS_PHASE):
+        report = run_checks(model, ctx)
+    signals += feedback.signals_from_report(report, workspace)
+    model_info["check_seconds"] = round(sum(report.timings.values()), 4)
     if any(s.severity == "failure" for s in signals):
         return signals, None, model_info
     with progress.phase_named(feedback.EXPORT_PHASE):

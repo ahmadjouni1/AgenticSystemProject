@@ -23,8 +23,8 @@ POSES = {
     "four_bar": [{"crank_joint": 1.0}, {"crank_joint": 4.0}],
     "gantry": [{"x_drive": 0.3, "y_head": -0.2}, {"x_drive": 0.85, "y_head": 0.3}],
     "toaster": [{"lever_slide": -0.08, "browning": 2.0}],
-    "door_hinge": [{"pin": 0.4}, {"pin": 2.9}],
-    "desk_lamp": [{"swivel": 1.0, "tilt": -0.3}, {"swivel": -2.5, "tilt": 0.5}],
+    "door_hinge": [{"pin": 0.4}, {"pin": 2.5}],
+    "desk_lamp": [{"swivel": 1.0, "tilt": -0.3}, {"swivel": -2.5, "tilt": 0.05}],
     "computer_mouse": [{"left_button_click": -0.03, "right_button_click": -0.01, "scroll": 4.0}],
     "folding_chair": [{"fold": -0.5}],
 }

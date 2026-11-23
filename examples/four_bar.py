@@ -66,10 +66,10 @@ def build(rocker_limits: tuple[float, float] | None = None) -> Assembly:
     coupler_tip = coupler.at((COUPLER, 0, 0))
     pin_on_rocker = linkage.frame_in(coupler_tip, rocker)
     rocker.add(
-        "bar", wire_from_points([(0, 0, 0), pin_on_rocker.frame.xyz], radius=WIDTH / 2,
+        "bar", wire_from_points([(0, 0, 0), pin_on_rocker.frame.xyz], radius=THICK / 2,
                                 cap_ends=True),
     )
-    rocker.add("pivot", Cylinder(radius=WIDTH / 2, height=THICK))
+    rocker.add("pivot", Cylinder(radius=WIDTH / 2, height=THICK))  # same layer as the crank
 
     linkage.joint("pin", "revolute", coupler_tip, pin_on_rocker, axis=z)
     linkage.articulation(root="ground", closures=["pin"])

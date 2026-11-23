@@ -26,6 +26,7 @@ from pathlib import Path
 
 MAIN = "main.py"
 TESTS_PHASE = "running run_tests()"
+CHECKS_PHASE = "running baseline checks"
 EXPORT_PHASE = "exporting"
 
 Where = tuple[str, int]
@@ -43,6 +44,16 @@ class SignalKind(StrEnum):
     EXPORT_ERROR = "export_error"
     TIMEOUT = "timeout"
     CRASH = "crash"
+    # Baseline checks (step 4).
+    OVERLAP = "overlap"
+    FLOATING = "floating"
+    SWEPT_COLLISION = "swept_collision"
+    SEPARATION = "separation"
+    LOOP = "loop"
+    MESH_HEALTH = "mesh_health"
+    ISLANDS = "islands"
+    DIMENSIONS = "dimensions"
+    ALLOWANCE = "allowance"
 
 
 @dataclass(frozen=True)
@@ -167,7 +178,56 @@ HINTS = {
                         "booleans) or remove the endless loop at this line.",
     SignalKind.CRASH: "The compile process died without a result; look for os._exit, deep "
                       "recursion, or a huge allocation in main.py.",
+    SignalKind.OVERLAP: "Move or resize one shape so the two only touch; if they interpenetrate "
+                        "by design (a pin in a bore), add ctx.allow_overlap(a, b, reason=...) in "
+                        "run_tests(ctx).",
+    SignalKind.FLOATING: "Give the body real support so it touches its neighbour (no gap), or "
+                         "ctx.allow_isolated(body, reason=...) if it is meant to be loose.",
+    SignalKind.SWEPT_COLLISION: "Change the joint limits, axis or geometry so the parts clear "
+                                "each other over the whole range.",
+    SignalKind.SEPARATION: "Put the joint origin on the hinge line and the axis along it, so the "
+                           "child stays in contact while it turns.",
+    SignalKind.LOOP: "Fix the link lengths or the driver's limits so the loop closes over the "
+                     "whole range.",
+    SignalKind.MESH_HEALTH: "Rebuild the named shape as a closed, consistently wound mesh.",
+    SignalKind.ISLANDS: "Make the shapes of one body touch or overlap slightly.",
+    SignalKind.DIMENSIONS: "Check the units: the SDK works in meters.",
+    SignalKind.ALLOWANCE: "Remove the allowance; nothing needs it.",
 }
+
+_CHECK_KINDS = {
+    "authored": SignalKind.TEST_FAILURE, "overlap": SignalKind.OVERLAP,
+    "floating": SignalKind.FLOATING, "swept_collision": SignalKind.SWEPT_COLLISION,
+    "combined_collision": SignalKind.SWEPT_COLLISION,
+    "separation": SignalKind.SEPARATION, "loop": SignalKind.LOOP,
+    "mesh_health": SignalKind.MESH_HEALTH, "islands": SignalKind.ISLANDS,
+    "dimensions": SignalKind.DIMENSIONS, "allowance": SignalKind.ALLOWANCE,
+}
+
+
+def signals_from_report(report: object, workspace: Path) -> list[CompileSignal]:
+    """One signal per check finding. A blocking finding is a failure; an allowed one is a
+    note that carries its reason; anything else is a warning."""
+    signals = []
+    for finding in report.findings:  # type: ignore[attr-defined]
+        kind = _CHECK_KINDS.get(finding.check, SignalKind.TEST_FAILURE)
+        message = finding.message
+        if finding.allowed:
+            message += f" (allowed: {finding.allowed})"
+        where = None
+        if finding.joint:
+            where = locate_by_name(f"'{finding.joint}'", workspace)
+        where = where or locate_by_name(message, workspace)
+        signal = _signal(kind, message, HINTS[kind], workspace, where)
+        if finding.blocking:
+            severity = "failure"
+        elif finding.allowed:
+            severity = "note"
+        else:
+            severity = "warning"
+        signals.append(CompileSignal(signal.kind, signal.message, signal.hint, signal.file,
+                                     signal.line, signal.source, severity))
+    return signals
 
 _VALIDATION_HINTS = (
     ("open in the rest pose", "Author the loop closed: build one end of the closure with "
@@ -294,10 +354,17 @@ _RULES = {
                              "message.",
     SignalKind.TIMEOUT: "- Find the slow or endless step at the reported line before editing "
                         "anything else.",
+    **dict.fromkeys(
+        (SignalKind.OVERLAP, SignalKind.FLOATING, SignalKind.SWEPT_COLLISION,
+         SignalKind.SEPARATION, SignalKind.LOOP, SignalKind.MESH_HEALTH),
+        "- Check failures are design evidence: fix the geometry, joint origin, axis or limits. "
+        "Use allow_* only for real, intended contact, with a concrete reason.",
+    ),
 }
 
 
-def _section(tag: str, title: str, signals: Sequence[CompileSignal]) -> list[str]:
+def _section(tag: str, title: str, signals: Sequence[CompileSignal],
+             hints: bool = True) -> list[str]:
     if not signals:
         return []
     lines = ["", f"<{tag}>", title]
@@ -305,7 +372,8 @@ def _section(tag: str, title: str, signals: Sequence[CompileSignal]) -> list[str
         lines.append(f"- {s.severity.upper()} [{s.kind}] {s.message}")
         if s.location:
             lines.append(f"  at {s.location}" + (f": {s.source}" if s.source else ""))
-        lines.append(f"  fix: {s.hint}")
+        if hints:
+            lines.append(f"  fix: {s.hint}")
     return [*lines, f"</{tag}>"]
 
 
@@ -329,7 +397,9 @@ def render_signals(
     """The ``<compile_signals>`` block: summary, failures, warnings, response rules."""
     failures = [s for s in signals if s.severity == "failure"]
     warnings = [s for s in signals if s.severity == "warning"]
+    notes = [s for s in signals if s.severity == "note"]
     header = f"status={status} failures={len(failures)} warnings={len(warnings)}"
+    header += f" allowed={len(notes)}" if notes else ""
     header += " cached=true" if cached else ""
     if failures:
         where = f" at {failures[0].location}" if failures[0].location else ""
@@ -344,6 +414,7 @@ def render_signals(
     lines.append("</summary>")
     lines += _section("failures", "Failures (blocking):", failures)
     lines += _section("warnings", "Warnings (non-blocking):", warnings)
+    lines += _section("allowed", "Allowed by run_tests(ctx), with reasons:", notes, hints=False)
     if failures:
         lines += _rules(failures[0], repeat_count)
     lines.append("</compile_signals>")

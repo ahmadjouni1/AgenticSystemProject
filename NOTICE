@@ -30,6 +30,12 @@ Articraft module):
   The loop-closure approach (articulation tree plus closure joints, bounded
   least-squares solve, joints pinned at limits reported in LoopClosureError), from
   articraft/sdk/assembly.py. Rewritten.
+- sdk/testing.py
+  The authored test API design (TestContext with expect_* checks, sample/track helpers,
+  allow_overlap / allow_isolated with reasons) and the baseline check list (floating
+  parts, overlap at rest, hinge separation, scale warnings, mesh health), from
+  articraft/sdk/testing.py and articraft/sdk/_collision.py. Rewritten; the swept
+  collision checks, scale-relative tolerances and blocking policy are new.
 - compiler/worker.py, compiler/runner.py, compiler/feedback.py
   The compile design: fresh worker process, runpy, phase progress file, one JSON
   payload, typed compile signals rendered as a <compile_signals> block with response

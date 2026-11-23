@@ -184,9 +184,16 @@ def _least_squares(residual, start: np.ndarray, lower: np.ndarray, upper: np.nda
         # Already closed: do not let finite-difference noise nudge joints the loop does
         # not constrain (e.g. a rail drive whose two carriages are mimicked).
         return start
-    result = least_squares(residual, start, bounds=(lower, upper), method="trf",
+    # Solve for the offset from the start, not the joint values themselves. SciPy's "trf"
+    # sizes its first trust region from the starting point (norm(x0)), so a start like
+    # [0, 4e-16] gets a 4e-16 trust region and gives up at once. An offset always starts
+    # at exactly 0, which SciPy turns into a first trust region of 1 x x_scale. x_scale=0.1
+    # keeps that first step modest (~6 degrees / 10 cm), so a rough warm start does not
+    # jump to the other branch of a loop; the region grows when bigger steps pay off.
+    result = least_squares(lambda offset: residual(start + offset), np.zeros_like(start),
+                           bounds=(lower - start, upper - start), method="trf", x_scale=0.1,
                            xtol=1e-14, ftol=1e-14, gtol=1e-14)
-    return result.x
+    return start + result.x
 
 
 def _open_loop_message(art: Articulation, unknowns: list[Joint], x: np.ndarray,

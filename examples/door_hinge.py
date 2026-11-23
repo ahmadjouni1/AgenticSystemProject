@@ -5,7 +5,8 @@ Helpers shown: ``ExtrudeWithHolesGeometry`` (leaves with screw holes),
 straight from geometry: ``body.at(knuckle_face)`` on a build123d cylinder gives a frame
 whose z axis is the knuckle's axis, so the joint is simply "about z".
 
-The leaves lie flat (fully open) at 0 and fold up to 170 degrees.
+The leaves lie flat (fully open) at 0 and fold up to 150 degrees (beyond about
+155 degrees the leaves would hit each other, which the swept check reports).
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ def build() -> Assembly:
     knuckle_face = top.faces().filter_by(GeomType.CYLINDER)[0]
     pin = fixed.at(knuckle_face)
     hinge.joint("pin", "revolute", pin, moving.at(pin.frame), axis=(0, 0, 1),
-                limits=(0.0, math.radians(170)))
+                limits=(0.0, math.radians(150)))
     return hinge
 
 

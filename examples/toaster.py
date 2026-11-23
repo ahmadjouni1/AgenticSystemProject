@@ -47,7 +47,7 @@ def build() -> Assembly:
     knob.add("pointer", ConeGeometry(0.003, 0.01).rotate_y(math.pi / 2).translate(0.011, 0, 0.0125))
 
     front = -depth / 2
-    toaster.joint("lever_slide", "prismatic", body.at((0.09, front - 0.012, 0.15)), lever.at(),
+    toaster.joint("lever_slide", "prismatic", body.at((0.09, front - 0.008, 0.15)), lever.at(),
                   axis=(0, 0, 1), limits=(-0.10, 0.0))
     toaster.joint("browning", "revolute", body.at((-0.09, front, 0.06), rpy=(math.pi / 2, 0, 0)),
                   knob.at(), axis=(0, 0, 1), limits=(0.0, math.radians(270)))

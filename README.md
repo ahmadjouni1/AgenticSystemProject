@@ -25,7 +25,7 @@ uv sync
 uv run pytest -q
 ```
 
-The suite has 187 tests. It takes about 45 s, most of it in the compiler tests, which
+The suite has 217 tests. It takes about 55 s, most of it in the compiler tests, which
 start real subprocesses.
 
 Try the examples:
@@ -56,8 +56,8 @@ The steps follow the parts of the original listed in the study.
 | 1, 1b, 1c | Geometry SDK: bodies, frames, joints, mimic, loop closures, walking warm start, 26 shape helpers, `frame_in`, `body.at(feature)`, manifold3d booleans | Done |
 | 2 | Export: URDF + GLB + OBJ + JSON manifest, versioned `result/vNNNN/` | Done |
 | 3 | Compiler: subprocess worker, Windows and POSIX process-tree kill, typed compile signals, cache, repeat detection | Done |
-| 4 | Checks: collisions, poses, floating parts, mesh health | Next |
-| 5 | Viewer | Planned |
+| 4 | Checks: run_tests(ctx) API, mesh health, floating parts, overlap, swept collisions (revolute + prismatic, loops), separation, scale-relative tolerances, blocking policy | Done |
+| 5 | Viewer | Next |
 | 6 | LLM client | Planned |
 | 7 | Agent tools | Planned |
 | 8 | Agent loop | Planned |

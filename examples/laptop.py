@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from sdk import Assembly, Box, Cylinder
+from sdk import Assembly, Box
 
 WIDTH = 0.32  # x, meters
 DEPTH = 0.22  # y
@@ -22,17 +22,14 @@ def build() -> Assembly:
 
     base = laptop.body("base")
     base.add("deck", Box((WIDTH, DEPTH, BASE_THICKNESS)), xyz=(0, 0, BASE_THICKNESS / 2))
-    base.add(
-        "hinge_barrel",
-        Cylinder(radius=0.004, height=WIDTH - 0.04),
-        xyz=(0, DEPTH / 2, BASE_THICKNESS),
-        rpy=(0, math.pi / 2, 0),  # cylinder axis z -> x
-    )
+    base.add("keyboard", Box((WIDTH - 0.04, DEPTH / 2, 0.001)),
+             xyz=(0, 0.02, BASE_THICKNESS - 0.0005))  # inlaid in the deck's top face
 
     # The lid's frame sits on the hinge line; the lid reaches forward (-y) from it.
     lid = laptop.body("lid")
     lid.add("panel", Box((WIDTH, DEPTH, LID_THICKNESS)), xyz=(0, -DEPTH / 2, LID_THICKNESS / 2))
-    lid.add("screen", Box((WIDTH - 0.02, DEPTH - 0.03, 0.001)), xyz=(0, -DEPTH / 2, -0.0005))
+    lid.add("screen", Box((WIDTH - 0.02, DEPTH - 0.03, 0.001)),
+            xyz=(0, -DEPTH / 2, 0.0005))  # inlaid in the panel's inner face
 
     laptop.joint(
         "hinge",

@@ -33,6 +33,8 @@ def build(follow_multiplier: float = 1.0) -> Assembly:
     for side, y in (("left", -RAIL_Y), ("right", RAIL_Y)):
         base.add(f"{side}_rail", Box((1.2, 0.04, RAIL_TOP)), xyz=(0.6, y, RAIL_TOP / 2))
     base.add("cable_guide", Box((0.7, 0.03, 0.01)), xyz=(0.35, -RAIL_Y - 0.1, 0.005))
+    for end, x in (("front_frame", 0.02), ("back_frame", 1.18)):  # ties rails and guide
+        base.add(end, Box((0.04, 2 * RAIL_Y + 0.14, 0.01)), xyz=(x, -0.05, 0.005))
 
     carriage = Box((0.12, 0.08, CARRIAGE_HEIGHT))
     left = gantry.body("left_carriage")
@@ -71,7 +73,7 @@ def build(follow_multiplier: float = 1.0) -> Assembly:
     )
     gantry.joint(
         "y_head", "prismatic",
-        bridge.at((0, 0, 0.03)), head.at(), axis=(0, 1, 0), limits=(-0.35, 0.35),
+        bridge.at((0, 0, 0.03)), head.at(), axis=(0, 1, 0), limits=(-0.30, 0.30),
     )
     gantry.articulation(root="base", closures=["bridge_right"])
     return gantry

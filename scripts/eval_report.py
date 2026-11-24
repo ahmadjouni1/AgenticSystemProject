@@ -97,6 +97,16 @@ def load(eval_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         rows.append({**by_id[match.group(1)], "rep": int(match.group(2)), "run_dir": run_dir,
                      "record": None if why else record, "status": status,
                      "interrupted": why, "interrupted_record": record if why else None})
+    # Jobs the last eval.py invocation planned but never started have no folder yet.
+    summary = eval_dir / "eval.json"
+    planned = json.loads(summary.read_text(encoding="utf-8")).get("jobs", []) \
+        if summary.is_file() else []
+    have = {(r["id"], r["rep"]) for r in rows}
+    for job in planned:
+        if job.get("id") in by_id and (job["id"], job.get("rep")) not in have:
+            rows.append({**by_id[job["id"]], "rep": int(job["rep"]), "run_dir": None,
+                         "record": None, "status": "not_started", "interrupted": None,
+                         "interrupted_record": None})
     order = {p["id"]: i for i, p in enumerate(benchmark["prompts"])}
     rows.sort(key=lambda r: (order[r["id"]], r["rep"]))
     return benchmark, rows
@@ -264,7 +274,7 @@ def report(name: str, benchmark: dict[str, Any], rows: list[dict[str, Any]],
              ((r["interrupted_record"].get("best") or {}).get("version") or "-")]
             for r in cut]))
         parts.append(f"\n{len(cut)} runs, ${spent:.3f}; a rerun of scripts/eval.py "
-                     "resumes them.")
+                     "resumes those with cost and time allowance left.")
     not_run = [n for n in not_run if not any(f"{r['id']}-r{r['rep']}" == n for r in cut)]
     if not_run:
         parts.append(f"\nNot run (yet): {', '.join(not_run)}.")

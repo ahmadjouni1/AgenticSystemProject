@@ -213,12 +213,42 @@ def test_no_run_starts_that_could_pass_the_total_cap(tmp_path, jobs) -> None:
     assert [j["status"] for j in summary["jobs"]] == ["success", "success", "not_started"]
 
 
+def test_the_report_lists_runs_the_cap_never_started(tmp_path) -> None:
+    s = settings(tmp_path, max_cost=0.30, max_total=0.70)
+    eval_script.run_eval(s, fake_launcher(0.25, []), log=lambda text: None)
+    _benchmark, rows = eval_report.load(s.eval_dir)
+    assert len(rows) == 3
+    assert [r["status"] for r in rows].count("not_started") == 1
+
+
 def test_http_402_stops_new_runs(tmp_path) -> None:
     s = settings(tmp_path)
     seen: list[float] = []
     summary = eval_script.run_eval(s, fake_launcher(0.01, seen, "ProviderError: HTTP 402"),
                                    log=lambda text: None)
     assert len(seen) == 1 and "402" in summary["stopped"]
+
+
+def test_an_old_402_in_a_resumed_runs_log_does_not_stop_new_runs(tmp_path) -> None:
+    """Logs are appended to across sessions; only this launch's output counts."""
+    s = settings(tmp_path)
+    logs = s.eval_dir / "logs"
+    logs.mkdir(parents=True)
+    jobs = eval_script.plan(eval_script.load_benchmark(s.benchmark), s.eval_dir, s.runs)
+    for job in jobs:
+        (logs / f"{job.key}.log").write_text("ProviderError: HTTP 402 (session 1)\n",
+                                             encoding="utf-8")
+    seen: list[float] = []
+    write = fake_launcher(0.01, seen)
+
+    def append(argv: list[str], log: Path) -> int:
+        old = log.read_text(encoding="utf-8")
+        code = write(argv, log)
+        log.write_text(old + "session 2: fine\n", encoding="utf-8")
+        return code
+
+    summary = eval_script.run_eval(s, append, log=lambda text: None)
+    assert len(seen) == len(jobs) and summary["stopped"] is None
 
 
 def test_off_peak_only_starts_no_run_at_peak_price(tmp_path, monkeypatch) -> None:

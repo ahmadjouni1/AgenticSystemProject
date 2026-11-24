@@ -270,14 +270,20 @@ class Evaluation:
                 return job, argv, allowance
             return None
 
-    def finish(self, job: Job, code: int, seconds: float, log: Path) -> None:
+    def finish(self, job: Job, code: int, seconds: float, log: Path, offset: int = 0) -> None:
+        """``offset``: the log's size before this launch. A resumed run's log holds its
+        earlier sessions too (an HTTP 402 among them, maybe); only this launch's part counts."""
         run_dir = run_dir_of(job)
         record = storage.read_record(run_dir) if run_dir else None
         with self.lock:
             self.reserved.pop(job.key, None)
             if record is not None:
                 self.spent[job.key] = float(record.get("cost_usd") or 0.0)
-            text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+            text = ""
+            if log.is_file():
+                with log.open("rb") as f:
+                    f.seek(offset)
+                    text = f.read().decode("utf-8", errors="replace")
             if OUT_OF_CREDIT in text and self.stop is None:
                 self.stop = "the provider returned HTTP 402 (out of credit)"
             self.outcome[job.key] = {
@@ -299,13 +305,14 @@ class Evaluation:
             job, argv, allowance = claimed
             log = self.settings.eval_dir / "logs" / f"{job.key}.log"
             self.say(f"{job.key}: {self.states[job.key].action} (allowance ${allowance:.2f})")
+            offset = log.stat().st_size if log.is_file() else 0
             started = time.time()
             try:
                 code = self.launcher(argv, log)
             except Exception as exc:  # noqa: BLE001 - one broken launch must not stop the rest
                 code = -1
                 self.say(f"{job.key}: launch failed: {type(exc).__name__}: {exc}")
-            self.finish(job, code, time.time() - started, log)
+            self.finish(job, code, time.time() - started, log, offset)
 
     def run(self) -> dict[str, Any]:
         workers = max(1, self.settings.jobs)

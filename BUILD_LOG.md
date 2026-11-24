@@ -2845,34 +2845,35 @@ From `scripts/eval_report.py --name v1`; the full report is `runs/eval_v1/report
 
 #### Success (Wilson 95% intervals)
 
-11 counted runs, 1-2 per prompt (2 prompts with none). With so few runs per category the intervals are wide: **indicative only**, not a measured difference.
+34 counted runs, 2-3 per prompt. With so few runs per category the intervals are wide: **indicative only**, not a measured difference.
 
 | category | success | rate | 95% interval |
 | --- | --- | --- | --- |
-| single (a single hinge or slide) | 3/3 | 100% | 44%-100% |
-| chain (multi-joint open chains) | 2/2 | 100% | 34%-100% |
-| independent (several independent joints) | 2/2 | 100% | 34%-100% |
-| loop (closed loops) | 0/2 | 0% | 0%-66% |
-| tool (everyday tools and mechanisms) | 2/2 | 100% | 34%-100% |
-| **overall** | 9/11 | 82% | 52%-95% |
+| single (a single hinge or slide) | 6/6 | 100% | 61%-100% |
+| chain (multi-joint open chains) | 5/8 | 62% | 31%-86% |
+| independent (several independent joints) | 6/6 | 100% | 61%-100% |
+| loop (closed loops) | 3/8 | 38% | 14%-69% |
+| tool (everyday tools and mechanisms) | 6/6 | 100% | 61%-100% |
+| **overall** | 26/34 | 76% | 60%-88% |
 
 #### Cost, time and turns (per run, means)
 
 | category | runs | cost / run | cost / success | time / run | turns | failed compiles | spent |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| single | 3 | $0.052 | $0.052 | 256 s | 9.7 | 1.3 | $0.155 |
-| chain | 2 | $0.200 | $0.200 | 1049 s | 23.5 | 4.0 | $0.400 |
-| independent | 2 | $0.134 | $0.134 | 657 s | 10.5 | 1.0 | $0.268 |
-| loop | 2 | $0.268 | - | 1485 s | 11.5 | 2.5 | $0.537 |
-| tool | 2 | $0.107 | $0.107 | 541 s | 9.5 | 0.5 | $0.214 |
-| **overall** | 11 | $0.143 | $0.175 | 748 s | 12.6 | 1.8 | $1.574 |
+| single | 6 | $0.049 | $0.049 | 244 s | 8.3 | 1.0 | $0.292 |
+| chain | 8 | $0.238 | $0.381 | 970 s | 21.1 | 3.6 | $1.904 |
+| independent | 6 | $0.136 | $0.136 | 562 s | 14.3 | 2.7 | $0.814 |
+| loop | 8 | $0.236 | $0.628 | 1047 s | 14.1 | 2.6 | $1.885 |
+| tool | 6 | $0.121 | $0.121 | 494 s | 10.2 | 1.2 | $0.724 |
+| **overall** | 34 | $0.165 | $0.216 | 704 s | 14.1 | 2.3 | $5.618 |
 
 #### Failure end states
 
 | end state | runs |
 | --- | --- |
-| no_progress | 1 |
-| time_exceeded | 1 |
+| budget_exceeded | 4 |
+| no_progress | 2 |
+| time_exceeded | 2 |
 
 #### Failure kinds
 
@@ -2880,13 +2881,15 @@ Runs with at least one failed compile of each kind (all runs), and the kind of t
 
 | kind | runs with it | last failure of a failed run |
 | --- | --- | --- |
-| validation | 4 | 0 |
-| overlap | 3 | 1 |
-| mesh_health | 1 | 0 |
-| runtime_error | 1 | 0 |
+| validation | 17 | 1 |
+| overlap | 13 | 3 |
+| runtime_error | 4 | 0 |
+| swept_collision | 4 | 0 |
+| test_failure | 4 | 0 |
+| floating | 3 | 1 |
+| mesh_health | 2 | 0 |
+| loop | 1 | 1 |
 | separation | 1 | 0 |
-| swept_collision | 1 | 0 |
-| test_failure | 1 | 0 |
 <!-- /eval_v1 -->
 
 ### What happened in eval_v1 (2026-11-24, 15:59-17:02 UTC, off-peak)
@@ -2913,4 +2916,46 @@ Runs with at least one failed compile of each kind (all runs), and the kind of t
   command resumes the interrupted ones with what is left of their allowance, and starts the
   rest.
 - **Blind rating:** 9 sheets in `runs/rating_v1/sheets/`, to fill in
-  `runs/rating_v1/ratings.csv`.
+  `runs/rating_v1/ratings.csv`. (Superseded: remade with all 26 successes; see below.)
+
+### eval_v1 resumed after the top-up (2026-11-24, 19:16-20:55 UTC, off-peak)
+
+- **Balance after the top-up: $9.86** (balance endpoint, 19:15 UTC).
+- **`--max-total` counts earlier spend.** `eval.py` loads every existing run's cost, the
+  interrupted ones included, before it starts anything. To keep this resume's new spend under
+  $4, the cap was `--max-total 6.05` ($2.09 already spent + at most $3.96 new).
+- **A false stop, fixed.**
+  - **What happened:** the first resume (19:16-19:34) stopped new runs after its first
+    finish with "HTTP 402", while the account still held $9.35.
+  - **Cause:** `launch_subprocess` appends each session to the run's log. The resumed
+    pantograph-r1's log still held session 1's 402 line, and `finish` scanned the whole log.
+  - **Fix:** `finish` now reads only what this launch wrote, from the log's size before
+    the launch. A test covers it.
+  - **Cost:** 3 runs finished in that window (pantograph-r1, robot_arm-r2, grand_piano-r2),
+    so nothing was lost; the relaunch went on from there.
+- **Final:** 35 of 36 runs attempted.
+  - **Counted:** 34 runs, 26 successes (76%, 60-88%).
+  - **Interrupted:** excavator_arm-r1. Its allowance was already used up before the 402, so
+    it cannot be resumed.
+  - **Not started:** pantograph-r3. The total cap stopped it ($5.89 spent + $0.30 > $6.05).
+  - **The report now lists runs never started.** They come from `eval.json`, since such a
+    run has no job folder.
+- **Closed loops are the weak category: 3/8.**
+  - **Scissor lift: 0/3.** Two runs ended no_progress with no compiled build, one
+    budget_exceeded.
+  - **Wipers: 2/3.** Pantograph: 1/2.
+  - **Excavator arm: 0/2 counted,** both budget_exceeded on validation/overlap failures. It is
+    the one chain prompt that never succeeded (robot arm 2/3, boom arm 3/3).
+  - **Every other prompt succeeded in every counted run.**
+- **Spend.**
+  - **Tracked:** $5.894 in all. Counted runs $5.618 and the interrupted run $0.276. $3.808 of
+    it was spent since the top-up.
+  - **Provider:** the balance went $9.86 → **$6.10**, a drop of $3.76. Tracking is within
+    $0.05 again.
+  - **Against the budget plan:** the benchmark cost $5.89 in all ($2.09 before the top-up,
+    $3.81 after), against the planned $5.
+  - **What's left: $6.10.** That covers the Articraft baseline ($3) and the solver re-test ($2),
+    with $1.10 of margin.
+- **Blind rating:** `runs/rating_v1` was remade with all 26 successes. The earlier 9-item sheet
+  had no ratings and was replaced. Fill in `runs/rating_v1/ratings.csv`, then run
+  `uv run python scripts/eval_rating.py score runs/rating_v1`.

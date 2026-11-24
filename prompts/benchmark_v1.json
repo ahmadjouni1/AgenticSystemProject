@@ -1,0 +1,97 @@
+{
+  "name": "benchmark_v1",
+  "_comment": "Step 12 benchmark: 12 prompts in 5 categories. None of them is a docs example or recipe (mailbox, floor hatch, wall cupboard, camp bench, four-bar), an examples/ object, or an earlier evaluation prompt (prompts/eval_prompts.json); tests/test_eval.py checks the object words. 'motion' is what a correct model does, for the human rater.",
+  "categories": {
+    "single": "a single hinge or slide",
+    "chain": "multi-joint open chains",
+    "independent": "several independent joints",
+    "loop": "closed loops",
+    "tool": "everyday tools and mechanisms"
+  },
+  "prompts": [
+    {
+      "id": "jewelry_box",
+      "category": "single",
+      "object": "jewelry box",
+      "prompt": "a jewelry box with a lid hinged at the back",
+      "motion": "the lid turns up about a horizontal axis along its back edge, from closed to about 100-110 degrees open"
+    },
+    {
+      "id": "sliding_window",
+      "category": "single",
+      "object": "sliding window",
+      "prompt": "a sliding window: a glass pane that slides sideways in its frame",
+      "motion": "one pane slides horizontally along the frame by about half the frame's width; the frame does not move"
+    },
+    {
+      "id": "robot_arm",
+      "category": "chain",
+      "object": "robot arm",
+      "prompt": "a robot arm with a rotating base, a shoulder, an elbow and a wrist",
+      "motion": "4 revolute joints in series: the base turns about the vertical axis, then shoulder, elbow and wrist pitch about horizontal axes, each link carrying the next"
+    },
+    {
+      "id": "boom_arm",
+      "category": "chain",
+      "object": "microphone boom arm",
+      "prompt": "a microphone boom arm clamped to a shelf edge, with a swivel and two jointed segments",
+      "motion": "the arm swivels about the vertical clamp axis, then two pitch joints between the segments raise and lower the microphone holder at the tip"
+    },
+    {
+      "id": "excavator_arm",
+      "category": "chain",
+      "object": "excavator arm",
+      "prompt": "an excavator arm on a turntable: boom, stick and bucket",
+      "motion": "the turntable turns about the vertical axis; boom, stick and bucket each pitch about parallel horizontal axes in one vertical plane"
+    },
+    {
+      "id": "grand_piano",
+      "category": "independent",
+      "object": "grand piano",
+      "prompt": "a grand piano with a lid that opens, a key cover and three pedals",
+      "motion": "independent joints: the lid turns up about its straight side, the key cover turns or slides over the keys, and each pedal pivots down a few degrees"
+    },
+    {
+      "id": "pickup_truck",
+      "category": "independent",
+      "object": "toy pickup truck",
+      "prompt": "a toy pickup truck with four spinning wheels, an opening hood and a drop-down tailgate",
+      "motion": "each wheel spins about its axle (unlimited), the hood turns up about its back edge and the tailgate turns down about its bottom edge, all independently"
+    },
+    {
+      "id": "scissor_lift",
+      "category": "loop",
+      "object": "scissor lift",
+      "prompt": "a scissor lift: a platform raised by crossed arms",
+      "motion": "each pair of crossed arms pivots at its middle; one end of each arm slides in a track as the platform rises and stays level (closed loops with sliding joints)"
+    },
+    {
+      "id": "windshield_wipers",
+      "category": "loop",
+      "object": "windshield wipers",
+      "prompt": "a pair of car windshield wipers driven by one motor",
+      "motion": "a motor crank drives a rod or rods that swing both wiper arms back and forth together about their pivots (crank-rocker loops); the two wipers move in step"
+    },
+    {
+      "id": "pantograph",
+      "category": "loop",
+      "object": "pantograph drawing copier",
+      "prompt": "a pantograph drawing copier: a linked parallelogram that copies a drawing at a larger scale",
+      "motion": "the bars form a parallelogram on one fixed pivot; moving the tracing point moves the pen point by a fixed scale factor, and the parallelogram stays closed in every pose"
+    },
+    {
+      "id": "stapler",
+      "category": "tool",
+      "object": "stapler",
+      "prompt": "a stapler",
+      "motion": "the top arm with the staple magazine pivots down toward the base about a pin at the back; the base stays on the table"
+    },
+    {
+      "id": "nutcracker",
+      "category": "tool",
+      "object": "nutcracker",
+      "prompt": "a nutcracker with two handles",
+      "motion": "two handles pivot about a shared pin at one end, so the jaws near the pin close as the handles are squeezed together"
+    }
+  ]
+}

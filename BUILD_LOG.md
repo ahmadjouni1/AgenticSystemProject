@@ -2694,3 +2694,129 @@ No live runs needed; everything is tested with ScriptedModel. Step 12 has not be
   resume refuses until the lock file is deleted by hand.
 - **`--list` could filter** by status or prompt, and a script could backfill
   `runs/index.jsonl` from older runs.
+
+## Step 12: Evaluation harness
+
+Built only: no live runs yet (about $2 left on DeepSeek, no top-up). Step 13 has not been
+started.
+
+### What was built
+
+| # | What | Files |
+| --- | --- | --- |
+| 1 | **The benchmark:** 12 prompts in 5 categories, each with an id, an object, the prompt and a one-line expected motion (for the rater). None is a docs example or recipe, an `examples/` object, or an earlier evaluation prompt. A test checks the object words, and the prompts are added to `eval_prompts.json` (`step12`), so the docs test also keeps future docs examples away from them | `prompts/benchmark_v1.json`, `prompts/eval_prompts.json` |
+| 2 | **`scripts/eval.py`:** prompts × runs as `python -m agent`, 2 at a time, into `runs/eval_<name>/jobs/<id>-r<rep>/`. It reads `runs/index.jsonl` to know which runs finished. See below | `scripts/eval.py`, `agent/__main__.py` (`--index`) |
+| 3 | **`scripts/eval_report.py`:** writes `runs/eval_<name>/report.md`, with success per category and overall (Wilson 95% intervals, flagged indicative), cost per run and per success, time, turns, failed compiles, failure end states, failure kinds, quality, a per-run table, and one render sheet per category (`renders/<category>.png`). The key tables also go into BUILD_LOG.md between `<!-- eval_<name> -->` markers; a second report replaces them | `scripts/eval_report.py` |
+| 4 | **Blind human rating:** `eval_rating.py make --names v1 [...]` pools the successful runs of one or more evaluations, shuffles them (fixed seed) and names them `item_NN`. Each sheet shows the rest pose (iso, front) and every driven joint moved 70% of the way to its farther limit, or less if a loop will not close, with no text at all (`rasterize(..., legend=False)`). `ratings.csv` has the prompt and expected motion, plus `realistic` (1-5), `motion_correct` (yes/no) and `notes`. `key.json` maps items to runs. `score` checks the CSV and gives the mean rating and the correct-motion share per evaluation and category | `scripts/eval_rating.py`, `agent/tools/render.py` |
+| 5 | **The Articraft baseline adapter** (prepared, not run): the same prompts through the original Articraft in WSL, with its DeepSeek provider and `deepseek-v4-pro`. The cost is computed from its token counts, since it records $0 for DeepSeek. The run is stopped from outside at the cost cap or the time limit, because it has neither. Each run gets a replica-style `record.json`, so the same report works. Setup, differences and the USDZ question: `docs/ARTICRAFT_BASELINE.md` | `scripts/articraft_baseline.py`, `docs/ARTICRAFT_BASELINE.md` |
+
+**The benchmark:**
+
+| Category | Id | Prompt |
+| --- | --- | --- |
+| single hinge or slide | jewelry_box | a jewelry box with a lid hinged at the back |
+| | sliding_window | a sliding window: a glass pane that slides sideways in its frame |
+| multi-joint open chains | robot_arm | a robot arm with a rotating base, a shoulder, an elbow and a wrist |
+| | boom_arm | a microphone boom arm clamped to a shelf edge, with a swivel and two jointed segments |
+| | excavator_arm | an excavator arm on a turntable: boom, stick and bucket |
+| several independent joints | grand_piano | a grand piano with a lid that opens, a key cover and three pedals |
+| | pickup_truck | a toy pickup truck with four spinning wheels, an opening hood and a drop-down tailgate |
+| closed loops | scissor_lift | a scissor lift: a platform raised by crossed arms |
+| | windshield_wipers | a pair of car windshield wipers driven by one motor |
+| | pantograph | a pantograph drawing copier: a linked parallelogram that copies a drawing at a larger scale |
+| everyday tools | stapler | a stapler |
+| | nutcracker | a nutcracker with two handles |
+
+- **Prompts left out:** the suggested lamp prompts (a task lamp, a parallelogram lamp)
+  clash with the step 9 desk lamp and `examples/desk_lamp.py`. A wardrobe with doors and
+  a drawer is close to the step 10 kitchen cabinet, and a car door is close to the
+  door-on-a-carcass recipe.
+- **Closest to an earlier prompt:** the nutcracker. It is a different object from the step
+  10 pliers, but the same mechanism (two handles on one pin).
+
+**How `eval.py` handles money, resumes and stops:**
+- **Caps:** `--max-cost` $0.30 per run and `--max-total` $1.50 for the evaluation.
+- **Starting a run:** a run starts only if the spend so far, plus a full per-run cap for
+  every run in flight, the new one included, stays within the total. Otherwise it waits
+  for a run in flight to end and free its reservation, and stops when none is left.
+- **How far the total can go over:** no run can start that could take the total past the
+  cap. It can only go over by what one call overshoots a run's own cap, about $0.07 for a
+  32k-token reply.
+- **Order:** repetition first, then round-robin over the categories. A stop on the cap
+  therefore leaves every category covered.
+- **A rerun:**
+  - finished runs (any end state) are kept;
+  - unfinished ones (a crash, sleep, a connection error, a stop on HTTP 402) are resumed
+    with what is left of their cost and time, at most 3 sessions per run;
+  - the rest are started.
+- **Stops and setup:** HTTP 402 stops new runs. The machine is kept awake. `--dry-run`
+  shows the plan, the worst case, and whether DeepSeek is at peak price now (off-peak is
+  half price; peak is 01-04 and 06-10 UTC, Monday to Friday).
+
+### Expected cost of 12 prompts × 1 run (an estimate, not measured)
+
+- **The basis:** step 10b's B2 ran off-peak (10:07-11:38 UTC). Per run it cost $0.047-0.098
+  for the simpler prompts and $0.258 for the closed-loop pump; $0.114 on average.
+- **This benchmark:** it has 3 closed-loop prompts, likely near the $0.30 cap, and 3
+  multi-joint chains. Estimate: **about $1.3-2.0 off-peak**, most likely about $1.6.
+- **Against the $1.50 cap:** the cap will probably stop 1-3 runs before they start. The
+  total stays at or below about $1.50 plus each run's last-call overshoot, worst case
+  about $1.64.
+- **At peak hours,** every number doubles, and the cap would stop about half the runs.
+- **Time:** about 1-1.5 hours with 2 at a time (B2's runs took 12 minutes on average; the
+  loop runs take up to 25).
+
+### Tests (15 new, no network or WSL, `tests/test_eval.py`)
+
+- **Benchmark:** 12 prompts with 2-3 per category; no clash with earlier objects, examples
+  or docs; registered for the docs test.
+- **`eval.py`, with the real agent CLI in-process and ScriptedModel:**
+  - every prompt runs, and a rerun keeps finished runs;
+  - a crashed run is resumed with its remaining allowance (2 sessions);
+  - the total cap (1 and 2 at a time; no run starts that could pass it);
+  - HTTP 402 stops new runs;
+  - the dry run.
+- **Report:**
+  - Wilson intervals;
+  - the tables (success, end states, failure kinds, per run);
+  - one sheet per category;
+  - the BUILD_LOG section replaced, not duplicated.
+- **Rating:** only successful runs are included, the CSV and key are right, the sheet has
+  no text in the label corner, and the scores and CSV errors are right.
+- **Articraft adapter:**
+  - the WSL command carries no key, and `WSLENV` forwards it;
+  - the path conversion;
+  - converting a run's record (success, cost, budget, time, max turns, and the quality from
+    `model.json`);
+  - the watcher stops a run on cost and on time.
+
+### How Articraft does it (study §12)
+
+- **Its tests come in four lanes:** unit, warm compile, scripted agent (`ScriptedModel`) and
+  one live test ("a simple box" must succeed). CI runs ruff, basedpyright and the non-live
+  lanes. An SDK benchmark tracks mesh speed and quality.
+- **There is no evaluation of output quality:** no prompt suite, no scores, no model
+  comparison. The study's idea for the replica was 10-20 prompts, recording success rate,
+  turns, dollars, failed compiles and the diagnostics left at the end, then a judge looking
+  at the previews.
+
+### What we changed vs Articraft, and why
+
+- **A fixed benchmark across categories of mechanism,** so a change can be measured where
+  it matters (closed loops are the hard case: step 10b's pump).
+- **Spend control built into the harness** (per-run and total caps, resume), because the
+  budget is real and small.
+- **Intervals with every rate.** With 1 run per prompt, a difference of one or two runs is
+  noise, and the report says so.
+- **A blind human rating** instead of a model judge, for now. It costs nothing, and the
+  sheets show motion as well as looks.
+
+### Open ideas
+
+- **A VLM judge** on the same blind sheets (the study's idea), once there is budget, checked
+  against the human ratings.
+- **Our checks on Articraft's outputs** need its USDZ meshes. See
+  docs/ARTICRAFT_BASELINE.md for the two routes: approving `usd-core`, or converting inside
+  WSL.
+- **More runs per prompt** (3) would make the category numbers mean something: about $5 at
+  off-peak prices.

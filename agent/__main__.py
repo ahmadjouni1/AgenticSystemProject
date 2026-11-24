@@ -84,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="USD per run")
     parser.add_argument("--max-calls", type=int, default=config.DEFAULT_MAX_CALLS)
     parser.add_argument("--runs", default=str(RUNS_ROOT), help="folder for run folders")
+    parser.add_argument("--index", default=None,
+                        help="the run index each finished session is added to (default: "
+                             "runs/index.jsonl for a run under runs/, else next to the run)")
     parser.add_argument("--context", choices=["v1", "none"], default="v1",
                         help="context policy (agent/context.py); none sends the full history")
     parser.add_argument("--effort", choices=["adaptive", "default"], default="adaptive",
@@ -134,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                  on_event=print_event, context=context, effort=effort,
                  max_time_s=args.max_time, lessons=args.lessons, prompt_set=args.prompt_set,
                  fix_reserve_s=args.fix_reserve, two_phase=args.two_phase,
-                 runs_root=args.runs)
+                 runs_root=args.runs, index=args.index)
     return report(result)
 
 
@@ -163,7 +166,7 @@ def resume_main(args) -> int:
           + (", two-phase" if options["two_phase"] else ""), flush=True)
     result = resume(run_dir, model, budget, args.max_turns, on_event=print_event,
                     context=context, effort=effort, max_time_s=args.max_time,
-                    runs_root=args.runs)
+                    runs_root=args.runs, index=args.index)
     return report(result)
 
 

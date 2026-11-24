@@ -172,8 +172,9 @@ def zbuffer(meshes, forward: np.ndarray, width: int, height: int,
 
 
 def rasterize(meshes, forward: np.ndarray, label: str,
-              right: np.ndarray | None = None) -> Image.Image:
-    """meshes: [(name, world trimesh)] -> an RGB image of one view."""
+              right: np.ndarray | None = None, legend: bool = True) -> Image.Image:
+    """meshes: [(name, world trimesh)] -> an RGB image of one view. ``legend=False`` draws
+    neither the label nor the body names (blind rating sheets, step 12)."""
     width, height = WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE
     face, colors, _owners, _scale = zbuffer(meshes, forward, width, height, right)
     pixels = np.empty((height, width, 3), dtype=np.uint8)
@@ -181,6 +182,8 @@ def rasterize(meshes, forward: np.ndarray, label: str,
     hit = face >= 0
     pixels[hit] = colors[face[hit]].astype(np.uint8)
     image = Image.fromarray(pixels, "RGB").resize((WIDTH, HEIGHT), Image.LANCZOS)
+    if not legend:
+        return image
     draw = ImageDraw.Draw(image)
     draw.text((8, 6), label, fill=(31, 41, 51))
     for index, (name, _mesh) in enumerate(meshes):

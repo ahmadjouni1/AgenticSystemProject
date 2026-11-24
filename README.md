@@ -79,6 +79,16 @@ experiment with `scripts/step10_experiment.py` and `scripts/step10_report.py` (s
 `record.json` has quality metrics of its best build (bodies, shapes, joints, share of
 non-box shapes, helpers used, triangles), and `renders/final/` its 4 views.
 
+**Evaluation (step 12).** `prompts/benchmark_v1.json` has 12 prompts in 5 categories.
+`uv run python scripts/eval.py --name v1 --dry-run` shows the plan, the worst-case cost and
+whether DeepSeek is at peak price now. Without `--dry-run` it runs the benchmark: $0.30 per
+run, no new run past `--max-total` ($1.50), 2 at a time, resuming unfinished runs on a
+rerun. `scripts/eval_report.py --name v1` writes the report (success with 95% intervals,
+cost, failures, quality, a render sheet per category) and adds its key tables to
+BUILD_LOG.md. `scripts/eval_rating.py` makes blind rating sheets and scores the filled-in
+CSV. `scripts/articraft_baseline.py` would run the same prompts through the original
+Articraft under WSL (prepared, not run: docs/ARTICRAFT_BASELINE.md).
+
 A run that stopped (time, budget, a crash) continues with `--resume <run folder>`, from its
 `conversation.jsonl` and workspace, with a new `--max-time` / `--max-cost` / `--max-calls`
 / `--max-turns`; the rest of the setup comes from its `record.json`, which keeps one entry
@@ -124,7 +134,7 @@ The steps follow the parts of the original listed in the study.
 | 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment (more detailed objects; planning reasoning not reduced) | Done |
 | 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` (optional high-detail mode); every model call capped at the time left | Done: B2 (the new default) 10/12 at $0.137 per success; D (two-phase) 9/12 at $0.194, more detail |
 | 11 | Run storage: messages to and from dicts, `--resume` (time_exceeded, budget_exceeded, a crash) with a new allowance and a list of sessions, `--list`, `runs/index.jsonl`, atomic writes | Done |
-| 12 | Evaluation | Planned |
+| 12 | Evaluation harness: 12-prompt benchmark in 5 categories, `scripts/eval.py` (spend caps, resume on rerun), report with confidence intervals and render sheets, blind human rating, Articraft baseline adapter (WSL, prepared) | Built; not run yet |
 | 13 | Extras (images, simulation, trajectories) | Planned |
 
 **Known risk: there is no sandbox.** As in Articraft, the compiler runs model-written

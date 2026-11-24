@@ -939,7 +939,8 @@ def _wire(model: Model, budget: Budget, run_dir: Path) -> None:
 def saved_options(record: dict[str, Any]) -> dict[str, Any]:
     """How a stopped run was set up (``record["options"]``; inferred for older records)."""
     options = dict(record.get("options") or {})
-    options.setdefault("role", (record.get("model") or {}).get("role") or "builder")
+    options["role"] = (options.get("role") or (record.get("model") or {}).get("role")
+                       or "builder")
     options.setdefault("context", "v1" if record.get("context_policy") else "none")
     options.setdefault("effort", asdict(EffortPolicy()))
     options.setdefault("prompt_set", record.get("prompt_set") or DEFAULT_PROMPT_SET)

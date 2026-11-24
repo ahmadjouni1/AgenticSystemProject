@@ -6,6 +6,9 @@ Writes ``runs/step10/report.md`` (also printed) and ``runs/step10/renders/``:
 - ``<prompt>__<variant>-<n>.png``: the run's 4 views (front, side, top, iso);
 - ``<prompt>__iso.png``: one sheet per prompt, a row per variant, a column per run, iso views.
 A run without a build gets a grey "no build" cell.
+
+Runs broken by something outside the variant are moved to ``runs/step10/excluded/<variant>/``
+and listed with the reason from ``excluded/reasons.json``; their re-runs count instead.
 """
 
 from __future__ import annotations
@@ -53,6 +56,19 @@ def reasoning_total(r: dict) -> int:
     return r["tokens"]["reasoning_tokens"]
 
 
+def first_write_reasoning(r: dict) -> int | None:
+    """Reasoning tokens of the turn that first writes main.py: the planning turn."""
+    for turn in r["per_turn"]:
+        if "write" in turn.get("tools", []):
+            return turn.get("reasoning_tokens", 0)
+    return None
+
+
+def median(values) -> float:
+    values = list(values)
+    return statistics.median(values) if values else float("nan")
+
+
 def quality_rows(rs: list[dict]) -> list[dict]:
     return [r["quality"] for r in rs if r["status"] == "success" and r.get("quality")
             and "error" not in r["quality"]]
@@ -71,6 +87,11 @@ def summary(rs: list[dict]) -> dict:
         "page_reads": sum(n for r in rs for p, n in r["doc_reads"].items()
                           if p != QUICKSTART),
         "planning_reasoning": mean(planning),
+        "planning_median": median(planning),
+        "write_turn": median(x for x in map(first_write_reasoning, rs) if x is not None),
+        "cost_per_success": (sum(r["cost_usd"] for r in rs) / sum(r["status"] == "success"
+                                                                  for r in rs)
+                             if any(r["status"] == "success" for r in rs) else float("nan")),
         "planning_share": sum(planning) / total if total else float("nan"),
         "reasoning": mean(reasoning_total(r) for r in rs),
         "output": mean(r["tokens"]["output_tokens"] for r in rs),
@@ -109,14 +130,17 @@ def report(data: dict[str, list[dict]]) -> str:
         rows.append([f"{v}: {VARIANTS[v]}", f"{s['success']}/{s['runs']}", f(s["turns"], ".1f"),
                      f(s["failed_compiles"], ".1f"), f(s["reminders"], ".1f"),
                      str(s["quickstart_rereads"]), str(s["page_reads"]),
-                     f(s["planning_reasoning"], ",.0f"), f(s["planning_share"], ".0%"),
+                     f(s["planning_reasoning"], ",.0f"), f(s["planning_median"], ",.0f"),
+                     f(s["write_turn"], ",.0f"), f(s["planning_share"], ".0%"),
                      f(s["reasoning"], ",.0f"), f(s["output"], ",.0f"),
                      f"${f(s['cost'], '.4f')}", f"${f(s['cost_total'], '.3f')}",
-                     f(s["time"], ".0f") + " s"])
+                     f"${f(s['cost_per_success'], '.3f')}", f(s["time"], ".0f") + " s"])
     parts.append(table(["variant", "success", "turns", "failed compiles", "reminders",
-                        "quickstart re-reads", "doc page reads", "reasoning before 1st compile",
-                        "share of reasoning", "reasoning / run", "output / run", "cost / run",
-                        "cost total", "time / run"], rows))
+                        "quickstart re-reads", "doc page reads",
+                        "reasoning before 1st compile (mean)", "(median)",
+                        "planning turn reasoning (median)", "share of reasoning",
+                        "reasoning / run", "output / run", "cost / run", "cost total",
+                        "cost / success", "time / run"], rows))
     parts.append("\nQuality of the successful builds (means; triangles: median):\n")
     rows = []
     for v, rs in data.items():
@@ -156,7 +180,25 @@ def report(data: dict[str, list[dict]]) -> str:
     parts.append(table(["variant", "prompt", "run", "status", "turns", "compiles ok/fail",
                         "reasoning before 1st compile", "reasoning", "cost", "time", "shapes",
                         "non-box", "helpers"], rows))
+    parts += excluded()
     return "\n".join(parts) + "\n"
+
+
+def excluded() -> list[str]:
+    """Runs moved out of the tables, with why, and what they cost."""
+    reasons_file = OUT / "excluded" / "reasons.json"
+    reasons = json.loads(reasons_file.read_text(encoding="utf-8")) if reasons_file.is_file() \
+        else {}
+    rows = []
+    for path in sorted((OUT / "excluded").glob("*/*/record.json")):
+        r = json.loads(path.read_text(encoding="utf-8"))
+        rows.append([path.parent.parent.name, SHORT[r["prompt"]], path.parent.name[:15],
+                     r["status"], f"{r['duration_s']:.0f} s", f"${r['cost_usd']:.4f}",
+                     reasons.get(path.parent.name, "-")])
+    if not rows:
+        return []
+    return ["\n## Excluded runs (re-run; not in the tables above)\n",
+            table(["variant", "prompt", "run", "status", "time", "cost", "why"], rows)]
 
 
 # ---- renders --------------------------------------------------------------------------------

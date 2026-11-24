@@ -291,3 +291,17 @@ def test_loading_a_mesh_with_an_open_piece_needs_no_repair() -> None:
     pieces = _pieces(trimesh.util.concatenate([closed, open_piece]))
     assert len(pieces) == 2
     assert sorted(len(p.faces) for _n, p in pieces) == [2, 12]
+
+
+def test_open_fragments_load_as_one_shape() -> None:
+    """Zero-area triangles can split off as one-triangle pieces. They must not each become a
+    shape: the collision scene is pairwise (step 10: 35,095 shapes, a 13-minute probe)."""
+    from viewer.loader import _pieces
+
+    boxes = [trimesh.creation.box((1, 1, 1)).apply_translation((3 * i, 0, 0)) for i in range(2)]
+    fragments = [trimesh.Trimesh(vertices=[[i, 5, 0], [i + 0.5, 5, 0], [i + 1, 5, 0]],
+                                 faces=[[0, 1, 2]], process=False) for i in range(3000)]
+    pieces = dict(_pieces(trimesh.util.concatenate(boxes + fragments)))
+    assert sorted(pieces) == ["open", "piece1", "piece2"]
+    assert len(pieces["open"].faces) == 3000
+    assert all(pieces[name].is_watertight for name in ("piece1", "piece2"))

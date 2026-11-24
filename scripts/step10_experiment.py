@@ -15,6 +15,10 @@ that time-of-day and API load fall on every variant alike. Each run is ``python 
 its own process; its console output goes to ``runs/step10/logs/``. Run folders go to
 ``runs/step10/<variant>/``. If any run gets HTTP 402 (out of credit), no further run starts. Then ``scripts/step10_report.py`` makes the tables and the render
 folder.
+
+``--redo "A:a folding table:3" ...`` re-runs single runs (log ``...-3-redo.log``), for runs broken
+by something outside the variant (the machine sleeping, a tool bug). While the script runs, it
+asks Windows not to sleep (``SetThreadExecutionState``; released when it exits).
 """
 
 from __future__ import annotations
@@ -49,8 +53,19 @@ def slug(text: str) -> str:
 STOP = threading.Event()  # set when the provider account is out of credit
 
 
-def job(variant: str, prompt: str, rep: int, max_cost: float) -> tuple[str, int, float]:
-    log = OUT / "logs" / f"{variant}-{slug(prompt)}-{rep}.log"
+def keep_awake() -> None:
+    """Ask Windows not to sleep while this process runs (2026-11-24: a standby in the middle
+    of the experiment broke 4 runs with connection errors and a 15-minute frozen compile)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        es_continuous, es_system_required = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+
+
+def job(variant: str, prompt: str, rep: int, max_cost: float,
+        suffix: str = "") -> tuple[str, int, float]:
+    log = OUT / "logs" / f"{variant}-{slug(prompt)}-{rep}{suffix}.log"
     if STOP.is_set():
         return log.name, -1, 0.0  # not started
     command = [sys.executable, "-m", "agent", prompt, "--runs", str(OUT / variant),
@@ -74,16 +89,29 @@ def main() -> None:
     parser.add_argument("--only", nargs="*", default=sorted(VARIANTS), help="variants")
     parser.add_argument("--prompt", nargs="*", default=PROMPTS, help="prompts")
     parser.add_argument("--max-cost", type=float, default=1.0, help="USD per run")
+    parser.add_argument("--redo", nargs="*", default=None, metavar="VARIANT:PROMPT:REP",
+                        help="re-run only these runs")
     args = parser.parse_args()
     unknown = set(args.only) - set(VARIANTS)
     if unknown:
         parser.error(f"unknown variants: {sorted(unknown)}")
     (OUT / "logs").mkdir(parents=True, exist_ok=True)
-    jobs = [(v, p, rep) for rep in range(1, args.runs + 1) for p in args.prompt
-            for v in args.only]
+    if args.redo is not None:
+        jobs = []
+        for item in args.redo:
+            variant, prompt, rep = item.split(":")
+            if variant not in VARIANTS or prompt not in PROMPTS:
+                parser.error(f"bad --redo entry: {item!r}")
+            jobs.append((variant, prompt, int(rep)))
+        suffix = "-redo"
+    else:
+        jobs = [(v, p, rep) for rep in range(1, args.runs + 1) for p in args.prompt
+                for v in args.only]
+        suffix = ""
+    keep_awake()
     print(f"{len(jobs)} runs, {args.jobs} at a time -> {OUT}", flush=True)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(job, v, p, rep, args.max_cost) for v, p, rep in jobs]
+        futures = [pool.submit(job, v, p, rep, args.max_cost, suffix) for v, p, rep in jobs]
         for future in futures:
             name, code, seconds = future.result()
             print(f"{name}: " + ("not started (out of credit)" if code == -1 else

@@ -2124,3 +2124,278 @@ Two re-runs of that prompt then succeeded. One of them compacted live:
 - **More runs per prompt:** with 2 runs, the drawer's 4.5 → 9.5 turns cannot be told from
   noise. Use 5 or more for step 12.
 - **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).
+
+## Step 10: System prompt and SDK docs
+
+Goals: (1) less planning reasoning (92% of reasoning came before the first compile in step 9);
+(2) more realistic, detailed objects; (3) no wasted turns. Each is measured below.
+
+Policy defaults are unchanged: context policy v1 and adaptive effort stay on.
+
+### What was built
+
+| File | What it is |
+| --- | --- |
+| `prompts/system.md` | System prompt v1: 69 lines, 4,359 characters, **1,103 tokens** (DeepSeek's count) |
+| `prompts/v0/` | Step 9's system prompt and docs, frozen for comparison (variant A) |
+| `docs/sdk/quickstart.md` | Cheat sheet plus a complete example, a mailbox with a hinged flap and a flag (replaces the laptop) |
+| `docs/sdk/shapes.md` | Every ported shape helper: signature, one line of use, a small example |
+| `docs/sdk/joints_and_loops.md` | Joint frames and the axis sign rule, motion patterns, clearance, mimic joints, closed loops: a four-bar with `frame_in` |
+| `docs/sdk/testing.md` | The `run_tests(ctx)` API, what is already checked, tolerances, allowances; a floor hatch on a pin hinge |
+| `docs/sdk/README.md` | Index of the pages |
+| `prompts/eval_prompts.json` | Every evaluation prompt so far (steps 8, 9, 10) |
+| `agent/quality.py` | Quality metrics of a build, and the final renders |
+| `agent/loop.py` | Prompt sets (`PROMPT_SETS`: v0 and v1, each a system prompt, quickstart, docs folder and task message); `EffortPolicy.planning_effort`; new record fields |
+| `agent/context.py` | Rules c and d extended to docs pages (below) |
+| `agent/__main__.py` | `--prompt-set v0/v1` (default v1), `--planning-effort default/low/medium/high` |
+| `scripts/step10_experiment.py`, `scripts/step10_report.py` | The A/B/C experiment, and its tables plus render folder |
+| `scripts/doc_tokens.py` | Real token sizes of the prompt and docs (cheap model, output capped at 1 token) |
+| `tests/test_docs.py`, `tests/test_quality.py` | 22 + 10 tests, plus 2 in `test_context.py`, 1 in `test_checks.py` and 3 in `test_export.py` |
+
+**System prompt v1.** Its size is about the same as v0 (1,103 vs 1,102 tokens), with the content shifted:
+- **Docs.** The quickstart is already in context, so it is never re-read. The 3 on-demand pages are listed with one line each.
+- **Realism (rule 1, rewritten).** Real proportions, and the details that make an object recognizable: handles, knobs, hinges, rims, feet, rounded edges, real wall and panel thickness ("a cabinet is a hollow carcass of panels"). One line names the shape helper for each kind of real part (rounded box, lathe, extrude, extrude with holes, tube, wire). "Avoid one-box-per-part designs".
+- **Plan step.** "Plan briefly, in your reply text, then write": at most about 15 lines (bodies with shapes and sizes, joints with type, parent -> child, pivot, axis, limits), then `write` in the same reply. "Do not deliberate at length before writing". The task message says the same.
+- **Finish checklist.** The latest compile passed with no edits after it; every movable joint probed at both ends of its range; a short final message.
+- **Moved out.** The `run_tests` API list moved to `testing.md`; the tool tips are shorter.
+
+**Docs pages** (token counts by DeepSeek, `scripts/doc_tokens.py`):
+
+| Page | Sent | Characters | Tokens |
+| --- | --- | --- | --- |
+| `prompts/system.md` (v1) | always | 4,359 | 1,103 |
+| `docs/sdk/quickstart.md` | always (second system message) | 5,745 | 1,820 |
+| `docs/sdk/shapes.md` | on demand | 5,685 | 1,923 |
+| `docs/sdk/joints_and_loops.md` | on demand | 4,822 | 1,471 |
+| `docs/sdk/testing.md` | on demand | 3,930 | 1,236 |
+| `docs/sdk/README.md` | on demand | 419 | 111 |
+| v0: `prompts/v0/system.md` + quickstart | always | 4,356 + 4,934 | 1,102 + 1,513 |
+
+The code-heavy pages tokenize at about 3 characters per token, not 4. So the size test uses
+2.9 characters per token, below every measured ratio (2.96–3.95); with 4, a page could have
+grown to about 2.6k real tokens and still passed.
+
+**Quality metrics** (`record.json` → `quality`, computed by code from the best build's
+`model.json` and its `main.py`):
+- bodies, shapes, joints (loop closures included) and movable joints;
+- `non_box_share`: the share of shapes that are not `Box` or `BoxGeometry`;
+- `helpers`: the distinct SDK shape helpers `main.py` refers to outside its imports. This is every geometry constructor or mesh function except the plain primitives (Box, Cylinder, Sphere and their mesh forms), so a `rounded_rect_profile` feeding an extrusion counts;
+- triangles; the count of each shape type.
+
+**Other new record fields:**
+- `prompt_set`;
+- `first_compile_turn`, `reasoning_before_first_compile` and `output_before_first_compile` (tokens up to and including the turn that first calls compile);
+- `doc_reads` (path → count);
+- `reminders` (kind → count);
+- `final_renders`: the best build at rest, front/side/top/iso plus a 2x2 sheet, in `renders/final/`.
+
+**Rules c and d for docs pages** (`agent/context.py`):
+- **Before:** rule d shortened every tool result older than 6 turns, docs reads included. In the first smoke run the model then read `shapes.md` 3 times.
+- **Now:** the latest read of each file or docs page stays whole, and reading a page again returns a note ("already in your context: your read of it at turn N, kept in full").
+- **After a compaction:** a page read in the summarized part can be read again.
+
+### Four SDK bugs, found while writing the docs, smoke-testing and running the experiment
+
+1. **Mesh health crashed on any open shape** (`sdk/testing.py`). The debris check split each shape with trimesh's default `repair=True`, which fills holes with networkx, and networkx is not a dependency. So a wire frame drawn as a closed polyline without `closed_path` compiled to `import_error: No module named 'networkx'`, with the hint to fix the imports. It was found in the first live smoke run, where the model fought this error:
+   - it wrote a one-box probe file to test whether the SDK worked at all;
+   - the probe passed and became the run's "best build";
+   - the run then hit `time_exceeded` (34 turns, $0.28).
+
+   The fix is `repair=False`; the shape now gets the "is open" warning it should. A regression test fails on the old code with the same error.
+2. **Export collapsed thin walls** (`sdk/export.py`). The collision-mesh simplifier doubled its tolerance until the mesh fit the triangle budget. On a 3 mm sheet-metal shell that erased the walls: "simplify produced an empty result", an `export_error` on a model that had passed every check. It was found writing the mailbox example. The fix stops at the last result that keeps the volume within 10%, or keeps the mesh unsimplified (over budget). On the test shell the old code kept 1.5% of the volume (32 triangles).
+3. **The viewer loader** (`viewer/loader.py`, used by `render`, `probe` and the viewer) had the same `split()` repair. It crashed on builds with an open piece; fixed the same way, with a regression test.
+
+4. **Thousands of one-triangle shapes in the loader** (`viewer/loader.py`), found in the
+   experiment. Once bug 3 was fixed, the split no longer crashed, but a body mesh with
+   zero-area triangles (a `RoundedBoxGeometry` writes about 15k triangles, a few of them
+   degenerate) split into one-triangle fragments, and each one became a shape. One B cabinet
+   build loaded as 35,095 shapes. The probe's collision scene compares shapes pairwise in
+   Python, so one `probe` call took 13 minutes, and the run hit `time_exceeded` with a
+   passing build. The fix keeps the closed pieces as shapes and merges every open piece into
+   one shape named `open`. The same probe now takes 25 s, load included. A regression test
+   covers it: 2 boxes plus 3,000 fragments load as 3 shapes; the old code gives 3,002.
+
+Bugs 1-3 existed before this step; bug 4 appeared once bug 3 was fixed. They matter more now than before, because the new prompt pushes hollow, thin-walled parts and helper shapes. Bugs 1-3 were fixed before the experiment. Bug 4 was fixed during it: the one run it broke was re-run, and no other run spent more than 39 s outside model calls.
+
+### Measurement (DeepSeek builder = deepseek-v4-pro, $1 cap, 2026-11-24 03:57-06:31 UTC)
+
+- **Setup:** 4 new prompts × 3 runs × 3 variants, 4 runs at a time, jobs interleaved
+  (repetition, then prompt, then variant). Command:
+  `scripts/step10_experiment.py --runs 3 --jobs 4`; tables from
+  `scripts/step10_report.py`, saved in `runs/step10/report.md`.
+- **The variants:**
+  - **A:** step 9's system prompt and docs;
+  - **B:** the v1 prompt and docs;
+  - **C:** B, plus `reasoning_effort=low` until the first compile.
+
+  All three use context policy v1, adaptive effort and the 15-minute limit.
+- **Excluded and re-run: 5 of the 36 runs.** They were broken by something outside the
+  variant:
+  - **The laptop went into Modern Standby at 05:12-05:34 UTC** (Windows System log: a power
+    source change, network disconnected, sleep). 3 runs ended with
+    `APIConnectionError` after 5 retries, and 1 compile sat frozen for 903 s.
+  - **Bug 4 above:** 1 run (B cabinet) lost 13 minutes to one probe.
+
+  These 5 runs are in `runs/step10/excluded/`, with the reasons in
+  `excluded/reasons.json`. They were re-run after the loader fix, with
+  `--redo VARIANT:PROMPT:REP`. The experiment script now also asks Windows not to sleep
+  while it runs (`SetThreadExecutionState`).
+- **No tool time left after that:** in every counted run, the time outside model calls is
+  at most 39 s.
+- **Spend:** $4.73 in all: $4.58 for the counted runs and $0.15 for the excluded ones.
+
+**Per variant (12 runs each):**
+
+| Variant | Success | Turns | Failed compiles | Quickstart re-reads | Doc page reads | Reasoning before 1st compile (mean / median) | Planning turn (median) | Reasoning after 1st compile (mean) | Reasoning / run | Cost / run | Cost / success | Time / run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A: step 9 prompt + docs | **9/12** | 8.8 | 1.1 | 4 | 14 | 28,272 / **15,178** | 12,017 | 7,550 | 35,822 | **$0.106** | **$0.141** | **528 s** |
+| B: v1 prompt + docs | 7/12 | 9.6 | 1.8 | **0** | 21 | 31,181 / 24,515 | 13,021 | 15,895 | 47,076 | $0.136 | $0.233 | 673 s |
+| C: B + low effort before the 1st compile | 7/12 | 10.6 | 2.0 | **0** | 19 | 27,536 / 24,136 | **7,456** | 27,478 | 55,015 | $0.140 | $0.240 | 701 s |
+
+- **"Planning turn"** is the reasoning of the turn that first writes `main.py`.
+- **Runs that never compile** count all their reasoning as "before the 1st compile", so the
+  median is the fairer number.
+- **End states:**
+  - A: 9 success, 3 time_exceeded;
+  - B: 7 success, 5 time_exceeded;
+  - C: 7 success, 4 time_exceeded, 1 no_progress.
+
+**Quality of the successful builds** (means; triangles: median):
+
+| Variant | Builds | Bodies | Shapes | Joints | Non-box shapes | Helpers / run | Triangles | Helpers used (any run) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 9 | 3.0 | 10.2 | 2.0 | 46% | 0.4 | 584 | Extrude, RoundedBox |
+| B | 7 | 3.1 | **14.0** | 2.1 | **78%** | **2.3** | 30,944 | Extrude, ExtrudeWithHoles, Lathe, RoundedBox, boolean_difference, boolean_union, sample_catmull_rom_spline_2d, wire_from_points |
+| C | 7 | 3.6 | 13.9 | 2.9 | 67% | 2.4 | 31,024 | Capsule, Extrude, ExtrudeWithHoles, Lathe, RoundedBox, rounded_rect_profile |
+
+**Per prompt** (success; median reasoning before the 1st compile is in the report):
+
+| Prompt | A | B | C |
+| --- | --- | --- | --- |
+| kitchen cabinet with two doors and a drawer | 3/3, $0.072 | 2/3, $0.149 | 3/3, $0.095 |
+| folding table | 3/3, $0.121 | 3/3, $0.111 | 1/3, $0.170 |
+| crank-slider pump | 0/3, $0.197 | 0/3, $0.180 | **2/3**, $0.163 |
+| pair of pliers | 3/3, $0.034 | 2/3, $0.104 | 1/3, $0.132 |
+
+**Renders:** `runs/step10/renders/` holds:
+- `<prompt>__iso.png`: one sheet per prompt, a row per variant, a column per run, each cell
+  labelled with status, turns and cost;
+- `<prompt>__<variant>-<n>.png`: each run's 4 views.
+
+What they show:
+- **Folding table: clearly better in B and C.** All three A tables are a flat top with their
+  legs folded under it at rest. Most B and C tables stand on tubular or panel leg frames;
+  B-2 has cross-braced tube frames.
+- **Pump: more detail in B and C.** Rounded bases, bored cylinders, crank discs and pins;
+  C-3 is a recognizable crank-slider.
+- **Pliers: mixed.** B-1 has curved handles and a pivot pin; the others are mostly bars.
+- **Cabinet: alike in all variants.** The iso camera shows the back or side of most
+  cabinets, so the doors hardly show.
+
+**What the numbers say, goal by goal:**
+
+1. **Less planning reasoning: not achieved.**
+   - **The written plan did not shorten planning.** Median reasoning before the 1st compile
+     went up: A 15.2k → B 24.5k → C 24.1k.
+   - **Where that reasoning happens:** before the write turn. In most runs, turn 1 reasons
+     8-25k tokens and then reads docs, or reads docs first and reasons on the next turn.
+   - **Low effort shortens the write turn** (median 13.0k → 7.5k), but not the turns before
+     it.
+   - **It moves reasoning rather than saving it.** C's worse first drafts take more fixing:
+     reasoning after the 1st compile is 27.5k per run, against 15.9k (B) and 7.6k (A).
+   - **The planning share of reasoning fell (79% → 66% → 50%),** but only because the fixing
+     grew.
+2. **More realistic, detailed objects: achieved, measured by code and seen in the renders.**
+   - Non-box shapes 46% → 78% (B) and 67% (C).
+   - Helpers per build 0.4 → 2.3-2.4.
+   - Shapes 10.2 → 14.0.
+   - The only variant with any pump success is C (2/3).
+
+   The cost: triangles rose 50x (median 584 → 31k), and complex geometry fails more checks
+   (failed compiles 1.1 → 1.8-2.0).
+3. **No wasted turns: mixed.**
+   - **Gained:** quickstart re-reads 4 → 0, and reminders 0.5 → 0.2.
+   - **Lost:** turns rose 8.8 → 9.6 (B) and 10.6 (C), from failed compiles.
+   - **Doc page reads 14 → 21:** the on-demand pages are read as intended, but each read
+     costs a turn.
+- **Success and cost:** B and C have 2 fewer successes than A (7 vs 9 of 12). Cost per
+  success is $0.141 → $0.233 / $0.240, and runs take 30% longer. With 3 runs per cell,
+  differences of 1 success per prompt are noise; the cost and reasoning shifts are
+  consistent across prompts.
+
+### Tests (38 new, no network)
+
+- **Docs (`test_docs.py`, 22):**
+  - the system prompt and each page are ≤ 2k tokens (2.9 characters per token, below every
+    ratio DeepSeek measured);
+  - the system prompt lists the 3 on-demand pages, one line each, and says the quickstart
+    is in context;
+  - only python/text code blocks;
+  - every python block runs: the 3 complete programs (mailbox, four-bar, floor hatch) go
+    through the real compiler with `warnings=0`, and every snippet's meshes are closed;
+  - every call named in a text block or inline code exists in the SDK;
+  - the quickstart example is the mailbox and matches no evaluation prompt; no docs program
+    builds an evaluation object, except the four-bar, which is allowed by name;
+  - the v0 prompt set is unchanged.
+- **Quality (`test_quality.py`, 10):**
+  - known examples: the mailbox gives 3 bodies, 8 shapes, 2 joints, 75% non-box and 4
+    helpers; the laptop is all boxes, 48 triangles;
+  - an import alone is not a helper use;
+  - `render_final` writes the 5 images;
+  - the prompt sets and their docs folders;
+  - the planning effort applies only before the first compile;
+  - the record fields; no build means no quality.
+- **Others:**
+  - `test_context.py` (2): a docs page read is kept whole and noted on re-read;
+  - `test_checks.py` (1): an open shape compiles without networkx;
+  - `test_export.py` (3): the thin shell keeps its volume; an open piece loads without
+    repair; fragments load as one shape.
+
+**374 tests pass, 1 skipped.**
+
+### How Articraft does it (study §10)
+
+- **The system prompt:** 3,402 tokens (2,861 text-only) in seven sections: `<role>`,
+  `<quality_requirements>` (4 rules), `<workflow>` (survey the docs → brief → build →
+  preview → compile → repair), `<authoring_contract>`, `<testing>`, `<tools>`,
+  `<final_response>`. It includes the "count the pivots" guidance for loops.
+- **Always sent:** `task.md` (256 tokens), the quickstart as a user message (1,210 tokens)
+  and 8 tool schemas (about 1,150 tokens).
+- **On demand:** about 192k tokens of docs. `common/` is 15.8k, `mesh/` 20.4k, the examples
+  4.9k, and about 150k are generic build123d docs. A run reads about 10-20k of them.
+- **Weak points:** the text-only prompt repeats its "Finish only when…" line, the trajectory
+  text is sent on every run, and most of the docs are generic.
+
+### What we changed vs Articraft, and why
+
+| Change | Why |
+| --- | --- |
+| A 1.1k-token system prompt (Articraft: 3.4k), with an explicit plan size (at most about 15 lines in the reply) and "do not deliberate at length" | To cut planning reasoning. Measured: it did not; the model deliberates in hidden reasoning whatever the prompt says |
+| 4 curated pages, ≤ 2k tokens each, 6.5k tokens in all (Articraft: about 192k, mostly generic build123d) | Every example in them is compiled by a test, so the docs cannot drift from the SDK |
+| The quickstart example is not any evaluation object (a mailbox), checked by a test | So that results measure the model, not a copied example |
+| Realism rules that name the helper for each kind of part | Measured: non-box shapes 46% → 78%, helpers per build 0.4 → 2.3 |
+| Quality metrics computed by code and saved in `record.json`, plus 4 final renders | Articraft has no quality metric in the run record; realism can now be compared across steps |
+| Planning effort (`--planning-effort`) as an option, off by default | Measured: it shortens the write turn by 43% but moves the reasoning to fixing, at a higher total cost |
+
+**Defaults after this step:** prompt set v1 (the more realistic objects are the goal of the
+replica), planning effort off.
+
+### Open ideas
+
+- **Planning reasoning is not controlled by the prompt.** Try:
+  - a hard output cap on the turns before the first compile (for example 12k), with
+    `<reply_cut_off>` asking for the plan and the write;
+  - giving the turn-1 reasoning nothing to search: put the page list's key signatures in the
+    quickstart, so no read turn starts a second deliberation;
+  - a cheaper planning model (deepseek-flash writes the plan, pro writes main.py).
+- **Triangle budget.** Detailed builds are about 31k triangles, against 584. A
+  `RoundedBoxGeometry` writes about 15k triangles even for a 5 cm foot. Scale its segments
+  to the radius, and drop zero-area triangles at the source.
+- **Rasterizer artifacts.** The final renders show dark triangular wedges on flat faces in
+  every variant (also on plain-box builds). The CPU rasterizer needs a depth or winding
+  fix.
+- **Render from the front.** The iso camera often shows the back of the object (most
+  cabinets). Pick the view from the model's own front, or the side the joints open toward.
+- **More runs:** 3 runs per cell cannot separate 1 success from noise. Step 12 needs 5 or
+  more.
+- **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).

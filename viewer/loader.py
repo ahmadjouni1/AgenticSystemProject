@@ -102,7 +102,15 @@ def _pieces(mesh: trimesh.Trimesh) -> list[tuple[str, trimesh.Trimesh]]:
     parts = mesh.split(only_watertight=False, repair=False)
     if len(parts) <= 1:
         return [("visual", mesh)]
-    return [(f"piece{i}", part) for i, part in enumerate(parts, 1)]
+    # Open pieces become one shape: a mesh with zero-area triangles can split into thousands
+    # of one-triangle fragments, and the collision scene tests shapes pairwise (step 10: a
+    # rounded-box cabinet loaded as 35,095 shapes, and one probe took 13 minutes).
+    closed = [part for part in parts if part.is_watertight]
+    open_parts = [part for part in parts if not part.is_watertight]
+    out = [(f"piece{i}", part) for i, part in enumerate(closed, 1)]
+    if open_parts:
+        out.append(("open", trimesh.util.concatenate(open_parts)))
+    return out
 
 
 def _sliders(assembly: Assembly) -> tuple[list[dict[str, Any]], str]:

@@ -253,7 +253,11 @@ def _collision_mesh(body, max_faces: int) -> tuple[trimesh.Trimesh, str]:
 
 def _simplify(mesh: trimesh.Trimesh, budget: int) -> tuple[trimesh.Trimesh, str]:
     """Shrink a closed mesh with manifold3d's simplify (surfaces move less than the
-    tolerance, which doubles until the budget is met); an open mesh gets its convex hull."""
+    tolerance, which doubles until the budget is met); an open mesh gets its convex hull.
+
+    Thin walls (sheet metal, shells) collapse once the tolerance reaches their thickness, so
+    the doubling stops at the last result that keeps the solid (volume within 10%); if even
+    the first step loses it, the mesh is kept as it is, over budget."""
     from sdk.booleans import from_manifold, to_manifold
 
     mesh = mesh.copy()
@@ -261,13 +265,20 @@ def _simplify(mesh: trimesh.Trimesh, budget: int) -> tuple[trimesh.Trimesh, str]
     if not mesh.is_watertight:
         return mesh.convex_hull, "convex_hull"
     solid = to_manifold(mesh)
+    volume = solid.volume()
     tolerance = 1e-4 * float(np.linalg.norm(mesh.extents))
+    kept = None
     for _ in range(24):
         reduced = solid.simplify(tolerance)
+        if reduced.is_empty() or abs(reduced.volume() - volume) > 0.1 * abs(volume):
+            break
+        kept = reduced
         if reduced.num_tri() <= budget:
             break
         tolerance *= 2
-    result = from_manifold(reduced, "simplify").to_trimesh()
+    if kept is None:
+        return mesh, "copy"
+    result = from_manifold(kept, "simplify").to_trimesh()
     return result, "manifold_simplify"
 
 

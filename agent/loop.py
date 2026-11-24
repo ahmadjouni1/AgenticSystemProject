@@ -58,6 +58,33 @@ from llm.protocol import UNKNOWN, Model, Reply
 REPLICA_ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PROMPT = REPLICA_ROOT / "prompts" / "system.md"
 QUICKSTART = REPLICA_ROOT / "docs" / "sdk" / "quickstart.md"
+
+
+@dataclass(frozen=True)
+class PromptSet:
+    """What the model is told: the system prompt, the quickstart (the second system message),
+    the folder the agent sees as ``docs/sdk/``, and the task message."""
+    name: str
+    system: Path
+    quickstart: Path
+    docs_dir: Path
+    task: str  # formatted with {prompt}
+
+
+PROMPT_SETS = {
+    # Step 9's prompt and docs, frozen for comparison (step 10 experiment, variant A).
+    "v0": PromptSet("v0", REPLICA_ROOT / "prompts" / "v0" / "system.md",
+                    REPLICA_ROOT / "prompts" / "v0" / "docs" / "quickstart.md",
+                    REPLICA_ROOT / "prompts" / "v0" / "docs",
+                    "Build this object: {prompt}\n\nThe workspace has a starter main.py. Plan "
+                    "the bodies and joints first, then write main.py."),
+    # Step 10: short written plan, realism rules, on-demand doc pages.
+    "v1": PromptSet("v1", SYSTEM_PROMPT, QUICKSTART, QUICKSTART.parent,
+                    "Build this object: {prompt}\n\nThe workspace has a starter main.py. Write "
+                    "a short plan (at most about 15 lines) in your reply, then call write with "
+                    "the whole main.py in the same reply."),
+}
+DEFAULT_PROMPT_SET = "v1"
 TEMPLATE = REPLICA_ROOT / "prompts" / "main_template.py"
 RUNS_ROOT = REPLICA_ROOT / "runs"
 
@@ -74,9 +101,11 @@ Event = dict[str, Any]
 @dataclass(frozen=True)
 class EffortPolicy:
     """Less reasoning on routine turns. A turn is routine once the latest compile passed
-    (verifying, probing, finishing); planning and fixing turns keep the model's default."""
+    (verifying, probing, finishing); fixing turns keep the model's default. Planning turns
+    (every call before the first compile) use ``planning_effort``, or the default if None."""
     routine_effort: str = "low"
     routine_max_output_tokens: int = 16_000
+    planning_effort: str | None = None
 
 
 @dataclass
@@ -195,15 +224,19 @@ class _Run:
     def __init__(self, prompt: str, model: Model, budget: Budget, max_turns: int, run_dir: Path,
                  compiler: Callable, on_event: Callable[[Event], None] | None,
                  context: ContextPolicy | None, effort: EffortPolicy | None,
-                 max_time_s: float | None, lessons: bool):
+                 max_time_s: float | None, lessons: bool, prompt_set: PromptSet):
         self.prompt, self.model, self.budget, self.max_turns = prompt, model, budget, max_turns
         self.context, self.effort, self.max_time_s, self.lessons = (context, effort, max_time_s,
                                                                     lessons)
+        self.prompt_set = prompt_set
         self.effort_turns: Counter[str] = Counter()
+        self.doc_reads: Counter[str] = Counter()
+        self.quality: dict[str, Any] | None = None
+        self.final_renders: list[str] = []
         self.run_dir = run_dir
         self.on_event = on_event or (lambda event: None)
         self.files = _Files(run_dir)
-        self.ctx = ToolContext(run_dir, compiler=compiler)
+        self.ctx = ToolContext(run_dir, compiler=compiler, docs_dir=prompt_set.docs_dir)
         self.tools = schemas()
         self.tools_chars = len(json.dumps(tools_to_chat(self.tools), ensure_ascii=False))
         self.messages: list[Message] = []
@@ -272,10 +305,42 @@ class _Run:
             "effort_turns": dict(self.effort_turns),
             "max_time_s": self.max_time_s,
             "lessons": self.lessons,
+            "prompt_set": self.prompt_set.name,
+            **self.planning_metrics(),
+            "doc_reads": dict(self.doc_reads),
+            "reminders": dict(Counter(t["reminder"] for t in self.per_turn
+                                      if t.get("reminder"))),
+            "quality": self.quality,
+            "final_renders": self.final_renders,
             "per_turn": self.per_turn,
         }
         self.files.save(record)
         return record
+
+    def planning_metrics(self) -> dict[str, Any]:
+        """Tokens spent up to and including the turn that first calls compile (all of the
+        run's tokens if it never compiles)."""
+        first = next((t["turn"] for t in self.per_turn if "compile" in t.get("tools", [])),
+                     None)
+        turns = [t for t in self.per_turn if first is None or t["turn"] <= first]
+        return {"first_compile_turn": first,
+                "reasoning_before_first_compile": sum(t.get("reasoning_tokens", 0)
+                                                      for t in turns),
+                "output_before_first_compile": sum(t.get("output_tokens", 0) for t in turns)}
+
+    def finish_quality(self) -> None:
+        """Quality metrics and the 4 final renders of the best build (never fails the run)."""
+        from agent.quality import quality, render_final
+
+        best = best_build(self.run_dir)
+        if best is None:
+            return
+        try:
+            self.quality = quality(self.run_dir / best["path"])
+            self.final_renders = render_final(self.run_dir, best)
+        except Exception as exc:  # metrics are for reports; keep the run's outcome
+            self.quality = {**(self.quality or {}),
+                            "error": f"{type(exc).__name__}: {exc}"}
 
     def account(self, reply: Reply) -> dict[str, Any]:
         self.usage = self.usage + reply.usage
@@ -366,13 +431,12 @@ class _Run:
     # -- one run --
 
     def run(self) -> RunResult:
-        system = SYSTEM_PROMPT.read_text(encoding="utf-8")
+        system = self.prompt_set.system.read_text(encoding="utf-8")
         if self.lessons:
             system += lessons_file.prompt_section()
         self.add(System(system))
-        self.add(System(QUICKSTART.read_text(encoding="utf-8")))
-        self.add(User(f"Build this object: {self.prompt}\n\nThe workspace has a starter "
-                      "main.py. Plan the bodies and joints first, then write main.py."))
+        self.add(System(self.prompt_set.quickstart.read_text(encoding="utf-8")))
+        self.add(User(self.prompt_set.task.format(prompt=self.prompt)))
         status, reason = "max_turns", f"stopped after {self.max_turns} turns"
         try:
             status, reason = self.loop()
@@ -387,6 +451,7 @@ class _Run:
             reason = f"{reason}; {describe_best(best_build(self.run_dir))}"
         if self.lessons:
             lessons_file.learn(self.run_dir)
+        self.finish_quality()
         record = self.record(status, reason)
         self.on_event({"kind": "end", "status": status, "reason": reason,
                        "run_dir": self.run_dir, "record": record})
@@ -416,6 +481,9 @@ class _Run:
                     options = {"effort": self.effort.routine_effort,
                                "max_output_tokens": self.effort.routine_max_output_tokens}
                     self.effort_turns["routine"] += 1
+                elif self.compiles["calls"] == 0 and self.effort.planning_effort is not None:
+                    options = {"effort": self.effort.planning_effort}
+                    self.effort_turns["planning"] += 1
                 else:
                     self.effort_turns["default"] += 1
                 metrics["effort"] = options.get("effort", "default")
@@ -441,6 +509,14 @@ class _Run:
                 compiled = False
                 for call, out in zip(reply.tool_calls, outputs, strict=True):
                     self.tool_counts[call.name] += 1
+                    path = call.arguments.get("path") if call.name == "read" else None
+                    if isinstance(path, str):
+                        path = path.replace("\\", "/").removeprefix("./")
+                        if path.startswith("docs/"):
+                            self.doc_reads[path] += 1
+                            if self.context is not None and not out.is_error \
+                                    and "text" in out.data:
+                                self.context.record_read(path, self.turn)  # rule c
                     if checkpoint and call.name == "compile" and not out.is_error:
                         compiled = True  # rule a: the signals go in the checkpoint message
                         data = {**out.data, "compile_signals": "[in the <checkpoint> message "
@@ -509,13 +585,17 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         compiler: Callable = compile_run,
         on_event: Callable[[Event], None] | None = None,
         context: ContextPolicy | None = None, effort: EffortPolicy | None = None,
-        max_time_s: float | None = MAX_TIME_S, lessons: bool = False) -> RunResult:
+        max_time_s: float | None = MAX_TIME_S, lessons: bool = False,
+        prompt_set: str | PromptSet = DEFAULT_PROMPT_SET) -> RunResult:
     """Run the agent on ``prompt`` until it finishes with a checked build, or stops.
 
     ``context``: the context policy (agent/context.py), or None to send the full history.
-    ``effort``: less reasoning on routine turns, or None for the model's settings.
-    ``max_time_s``: wall-clock budget (end state ``time_exceeded``). ``lessons``: use and
-    update runs/lessons.md (off by default)."""
+    ``effort``: less reasoning on routine (and optionally planning) turns, or None for the
+    model's settings. ``max_time_s``: wall-clock budget (end state ``time_exceeded``).
+    ``lessons``: use and update runs/lessons.md (off by default). ``prompt_set``: the system
+    prompt, quickstart and docs (``PROMPT_SETS``; "v0" is step 9's)."""
+    if isinstance(prompt_set, str):
+        prompt_set = PROMPT_SETS[prompt_set]
     run_dir = Path(run_dir).resolve() if run_dir is not None else new_run_dir(prompt, runs_root)
     for sub in ("workspace", "result", "renders"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -530,8 +610,8 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
     if getattr(model, "budget", budget) is not budget:
         raise ValueError("the model has a different Budget than the one given to run()")
     return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
-                max_time_s, lessons).run()
+                max_time_s, lessons, prompt_set).run()
 
 
-__all__ = ["MAX_TIME_S", "MAX_TURNS", "EffortPolicy", "RunResult", "best_build", "new_run_dir",
-           "run"]
+__all__ = ["DEFAULT_PROMPT_SET", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS", "EffortPolicy",
+           "PromptSet", "RunResult", "best_build", "new_run_dir", "run"]

@@ -11,11 +11,12 @@ import pytest
 
 from agent import lessons
 from agent.context import ContextConfig, ContextPolicy
-from agent.loop import QUICKSTART, EffortPolicy, run
+from agent.loop import PROMPT_SETS, EffortPolicy, run
 from llm import Assistant, Budget, ScriptedModel, ToolResult, User
 from llm.messages import to_chat, validate
 
-GOOD = re.findall(r"```python\n(.*?)```", QUICKSTART.read_text(encoding="utf-8"), re.S)[-1]
+LAPTOP_DOC = PROMPT_SETS["v0"].quickstart  # step 9's quickstart: a known-good laptop
+GOOD = re.findall(r"```python\n(.*?)```", LAPTOP_DOC.read_text(encoding="utf-8"), re.S)[-1]
 BAD = GOOD.replace("limits=(0.0, math.radians(135))", "limits=(0.5, 1.0)")
 FIX = {"tool_calls": [{"name": "edit", "arguments": {"path": "main.py", "edits": [
     {"old_text": "limits=(0.5, 1.0)", "new_text": "limits=(0.0, math.radians(135))"}]}}]}
@@ -305,3 +306,38 @@ def test_an_empty_cut_off_reply_is_not_sent_back_empty(tmp_path) -> None:
             if item["role"] == "assistant":  # never an assistant message with nothing set
                 assert item.get("content") or item.get("tool_calls") or \
                     item.get("reasoning_content")
+
+
+# ---- step 10: docs pages stay whole, and a second read gets a note ----------------------------
+
+
+def test_a_docs_page_is_kept_whole_and_not_read_twice(tmp_path) -> None:
+    shapes = {"tool_calls": [{"name": "read", "arguments": {"path": "docs/sdk/shapes.md"}}]}
+    config = ContextConfig(old_after_turns=3)
+    replies = [shapes, write(BAD), COMPILE, FIX, COMPILE, READ_MAIN, READ_MAIN, shapes, DONE]
+    result, model, policy = go(tmp_path, replies, config)
+    assert result.status == "success"
+    assert_well_formed(model)
+    # Turn 6: rebuilt after the turn-5 checkpoint; turn 1's read is old but the latest of
+    # that page, so it stays whole (rule d no longer shortens it).
+    first_read = next(m for m in sent(model, 5) if isinstance(m, ToolResult))
+    text = json.loads(first_read.content)["text"]
+    assert text.startswith("L1: # Shapes") and "shortened" not in text
+    # Turn 8's read of the same page gets a note instead of the page again.
+    second = [m for m in sent(model, 8) if isinstance(m, ToolResult)][-1]
+    note = json.loads(second.content)["note"]
+    assert "your read of it at turn 1, kept in full" in note
+    assert policy.hits["c_doc_notes"] == 1
+    assert result.record["doc_reads"] == {"docs/sdk/shapes.md": 2}
+
+
+def test_only_pages_read_in_full_get_a_note() -> None:
+    policy = ContextPolicy(ContextConfig())
+    assert policy.doc_note("docs/sdk/shapes.md") is None  # not read yet
+    policy.record_read("docs/sdk/shapes.md", 2)
+    assert "turn 2" in policy.doc_note("./docs/sdk/shapes.md")["note"]
+    policy.record_read("docs/sdk", 4)  # a folder listing is not a page
+    assert policy.doc_note("docs/sdk") is None
+    off = ContextPolicy(ContextConfig(doc_notes=False))
+    off.record_read("docs/sdk/shapes.md", 2)
+    assert off.doc_note("docs/sdk/shapes.md") is None

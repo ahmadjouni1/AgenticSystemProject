@@ -64,6 +64,12 @@ Articraft module):
   recent turns, and clipping tool outputs in the summary input, from
   articraft/agent/compaction.py. Rewritten; the per-checkpoint rules (reasoning, pinned
   state, doc notes, old-output shortening) and the low threshold are new.
+- prompts/system.md, docs/sdk/*.md
+  The four quality rules, a quickstart always sent with the system prompt plus docs pages
+  read on demand (testing, joints, mesh helpers), and authoring a closed loop as a tree plus
+  one closing joint, from articraft/prompts/system.md and articraft/sdk/docs. Rewritten for
+  this SDK; the examples (mailbox, four-bar with frame_in, floor hatch) were written for
+  this project.
 - docs/ARTICRAFT_STUDY.md, docs/SHAPE_HELPERS.md
   A study of Articraft with short code excerpts (each 15 lines or fewer) quoted from its
   source for commentary, and an inventory of its mesh helpers.

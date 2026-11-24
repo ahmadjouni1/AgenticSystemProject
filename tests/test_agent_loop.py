@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.loop import QUICKSTART, run
+from agent.loop import PROMPT_SETS, run
 from llm import Budget, ScriptedModel
 from llm.config import PROVIDERS
 from llm.openai_chat import OpenAIChatModel
@@ -18,8 +18,9 @@ from llm.openai_chat import OpenAIChatModel
 sys.path.insert(0, os.path.dirname(__file__))
 from check_fixtures import DRAWER_SOURCE  # noqa: E402
 
-# The quickstart's own example: it must compile (this keeps the docs honest).
-GOOD = re.findall(r"```python\n(.*?)```", QUICKSTART.read_text(encoding="utf-8"), re.S)[-1]
+# A known-good program: step 9's laptop (the docs examples are compiled by tests/test_docs.py).
+LAPTOP_DOC = PROMPT_SETS["v0"].quickstart
+GOOD = re.findall(r"```python\n(.*?)```", LAPTOP_DOC.read_text(encoding="utf-8"), re.S)[-1]
 BAD_LIMITS = GOOD.replace("limits=(0.0, math.radians(135))", "limits=(0.5, 1.0)")
 assert BAD_LIMITS != GOOD
 
@@ -74,7 +75,8 @@ def test_clean_success(tmp_path) -> None:
     # The first request: system prompt, quickstart, task; the tools in registry order.
     messages, tools = model.requests[0]
     assert [type(m).__name__ for m in messages] == ["System", "System", "User"]
-    assert "Quality rules" in messages[0].content and "SDK quickstart" in messages[1].content
+    assert "What a good object is" in messages[0].content
+    assert "SDK quickstart" in messages[1].content
     assert [t.name for t in tools] == ["read", "write", "edit", "compile", "render", "probe"]
     roles = [m["role"] for m in conversation(result)]
     assert roles == ["system", "system", "user", "assistant", "tool", "assistant", "tool",

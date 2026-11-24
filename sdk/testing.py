@@ -632,7 +632,9 @@ class _Checker:
         return out
 
     def _debris(self, mesh, body: str, name: str) -> list[Finding]:
-        pieces = mesh.split(only_watertight=False)
+        # repair=False: trimesh would otherwise fill the holes of open pieces, which needs
+        # networkx (not a dependency): an open shape crashed the compile with an ImportError.
+        pieces = mesh.split(only_watertight=False, repair=False)
         if len(pieces) < 2:
             return []
         overall = float(np.linalg.norm(mesh.extents))

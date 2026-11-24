@@ -98,7 +98,8 @@ def _pieces(mesh: trimesh.Trimesh) -> list[tuple[str, trimesh.Trimesh]]:
     The export merges a body's shapes into one mesh, which is not watertight where shapes
     overlap; each piece of a closed shape is. Collision depth needs closed solids, so the
     checks and the agent's probe get the pieces, as the original model had separate shapes."""
-    parts = mesh.split(only_watertight=False)
+    # repair=False: never fill holes (that needs networkx, and would change the geometry).
+    parts = mesh.split(only_watertight=False, repair=False)
     if len(parts) <= 1:
         return [("visual", mesh)]
     return [(f"piece{i}", part) for i, part in enumerate(parts, 1)]

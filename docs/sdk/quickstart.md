@@ -1,104 +1,113 @@
 # SDK quickstart
 
-`from sdk import ...`. Meters and radians everywhere; the world is Z-up.
+`from sdk import ...`. Meters and radians; the world is Z-up. More pages: `shapes.md`,
+`joints_and_loops.md`, `testing.md` (in `docs/sdk/`).
 
-## Building blocks
+## Cheat sheet
 
-```python
-model = Assembly("laptop")             # the object
-base = model.body("base")              # a rigid body; its frame is where you put it
-base.add("deck", Box((0.32, 0.22, 0.015)), xyz=(0, 0, 0.0075), rpy=(0, 0, 0))
+```text
+model = Assembly("name")                      # the object
+body = model.body("name")                     # a rigid part; its frame is where you put it
+body.add("shape", geometry, xyz=(x, y, z), rpy=(roll, pitch, yaw))   # place a shape on it
+model.joint("name", "revolute" | "prismatic" | "fixed", parent.at(point, rpy=None),
+            child.at(point, rpy=None), axis=(x, y, z), limits=(lower, upper), mimic=None)
+model.articulation(root="base", closures=["pin"])  # only for closed loops
+object_model = model                          # required
+def run_tests(ctx): ...                       # optional extra checks (testing.md)
 ```
 
-- `body.add(name, geometry, xyz=..., rpy=...)` places a shape in the body's frame. Shape names
-  are unique within a body. A body may have several shapes; they should touch each other.
-- Geometry:
-  - `Box((sx, sy, sz))`: full extents, centred on its origin.
-  - `Cylinder(radius, height)`: axis along local z, centred. Turn it with `rpy`
-    (`rpy=(0, math.pi / 2, 0)` puts the axis along x).
-  - `Sphere(radius)`.
-  - `RoundedBoxGeometry((sx, sy, sz), radius)`: a box with rounded edges.
-  - `LatheGeometry([(r, z), ...])`: a profile revolved about z (knobs, shades, bottles).
-  - `ExtrudeGeometry([(x, y), ...], height)`: a 2D outline extruded along z;
-    `rounded_rect_profile(w, h, r)` gives a rounded outline.
-  - `wire_from_points([(x, y, z), ...], radius=r, cap_ends=True)`: a rod through points.
-  - `tube_from_spline_points([...], radius=r)`: a smooth bent tube.
-  - `boolean_difference(a, b)`, `boolean_union(a, b)`: mesh booleans (cut a slot, a hole).
-- Place every shape with `body.add(..., xyz=..., rpy=...)`. `Box`, `Cylinder` and `Sphere` have
-  no `.translate`. Only mesh geometries (`BoxGeometry((sx, sy, sz))`, `CylinderGeometry(r, h)`,
-  the helpers above) can be moved before a boolean: `.translate(x, y, z)`, `.rotate_z(angle)`.
+Geometry (signatures and examples in `shapes.md`):
 
-## Joints
+| Need | Use |
+| --- | --- |
+| a part that really is a block | `Box((sx, sy, sz))`, centred |
+| soft-edged block: housings, cushions, posts | `RoundedBoxGeometry((sx, sy, sz), radius)` |
+| round part: knobs, legs, cups, shades | `LatheGeometry([(r, z), ...])` |
+| plate or outline: brackets, jaws, panels, arches | `ExtrudeGeometry(profile_xy, thickness)` |
+| plate with holes or a hollow section | `ExtrudeWithHolesGeometry(outer, [hole, ...], thickness)` |
+| rod, rail, wire frame, bent handle | `wire_from_points(points, radius=r)` |
+| smooth bent tube or cable | `tube_from_spline_points(points, radius=r)` |
+| pin, axle, wheel | `Cylinder(radius, height)` (axis along local z) |
+| holes, slots, unions | `boolean_difference(a, b)`, `boolean_union(a, b)` |
 
-```python
-model.joint(name, type, parent.at(point, rpy=None), child.at(point, rpy=None),
-            axis=(x, y, z), limits=(lower, upper), mimic=None)
-```
+- Shapes on one body should touch each other. Turn a shape with `rpy`:
+  `rpy=(0, math.pi / 2, 0)` puts a local z axis along x; `rpy=(math.pi / 2, 0, 0)` puts it
+  along -y (so a 2D profile drawn in x, y stands up in x, z).
+- `Box`, `Cylinder`, `Sphere` have no `.translate`. Mesh geometries (`BoxGeometry`,
+  `CylinderGeometry` and every helper above) do: `.translate(x, y, z)`, `.rotate_z(a)`.
 
-- `type`: `"revolute"` (hinge; limits in radians), `"prismatic"` (slide; limits in meters) or
-  `"fixed"`.
-- `parent.at(...)` is the joint frame on the parent, `child.at(...)` the same frame on the child.
-  At joint value 0 the two frames coincide: that is the **rest pose**, exactly as you authored
-  the geometry.
-- `axis` is in the parent frame. A positive value turns the child about the axis by the
-  right-hand rule, or slides it along the axis.
-- **Limits must contain 0** (the rest pose is a valid pose): a lid authored closed opens with
-  `limits=(0, 2.3)`, a drawer authored shut slides out with `limits=(0, 0.3)`. `None` means
-  unlimited (wheels, cranks).
-- **Every body except the root has exactly one tree joint** to its parent. The root is the body
-  with no parent (the base, the cabinet, the ground).
-- **Mimic:** `mimic=("source_joint", multiplier, offset)` makes a joint follow another (two
-  gears, a symmetric gripper).
-- **Loops** (four-bar linkages): build the open chain, add the last joint as usual, then
-  `model.articulation(root="ground", closures=["pin"])`. The solver closes the loop. To place the
-  closing pin, `model.frame_in(coupler.at((L, 0, 0)), rocker)` gives the coupler tip's frame on
-  the rocker at rest.
+## Joints in one paragraph
 
-## A complete example: a laptop
+`parent.at(...)` and `child.at(...)` are the same physical frame seen from each body; at joint
+value 0 they coincide, so **0 is the pose you authored** and **limits must contain 0**. Put
+the frame on the real hinge line or slide rail. `axis` is in the parent frame; positive
+values turn by the right-hand rule or slide along it. Revolute limits are radians, prismatic
+meters, `None` is unlimited (wheels). Every body but the root has exactly one joint to its
+parent. `mimic=("source_joint", multiplier, offset)` makes a joint follow another. Loops
+(four-bars, slider-cranks) and more patterns: `joints_and_loops.md`.
+
+## A complete example: a mailbox with a hinged flap
 
 ```python
 import math
 
-from sdk import Assembly, Box
+from sdk import (Assembly, Box, Cylinder, ExtrudeGeometry, ExtrudeWithHolesGeometry,
+                 LatheGeometry, RoundedBoxGeometry)
 
-WIDTH, DEPTH = 0.32, 0.22          # x, y
-BASE_T, LID_T = 0.015, 0.008       # thicknesses
+W, WALL_H, DEPTH, T = 0.18, 0.12, 0.46, 0.003  # width (x), straight side, depth (y), sheet
+POST_H = 0.95
 
-laptop = Assembly("laptop")
 
-base = laptop.body("base")
-base.add("deck", Box((WIDTH, DEPTH, BASE_T)), xyz=(0, 0, BASE_T / 2))
-base.add("keyboard", Box((WIDTH - 0.04, DEPTH / 2, 0.001)),
-         xyz=(0, 0.02, BASE_T - 0.0005))          # inlaid in the deck's top face
+def arch(width, wall_h, inset=0.0, n=16):
+    """Mailbox outline in the xz plane (x, z): straight sides and a half-round top."""
+    r = width / 2 - inset
+    pts = [(-r, inset), (r, inset)]
+    pts += [(r * math.cos(a), wall_h + r * math.sin(a))
+            for a in [math.pi * i / n for i in range(n + 1)]]
+    return pts
 
-# The lid's frame sits on the hinge line; the lid reaches forward (-y) from it.
-lid = laptop.body("lid")
-lid.add("panel", Box((WIDTH, DEPTH, LID_T)), xyz=(0, -DEPTH / 2, LID_T / 2))
-lid.add("screen", Box((WIDTH - 0.02, DEPTH - 0.03, 0.001)), xyz=(0, -DEPTH / 2, 0.0005))
 
-laptop.joint(
-    "hinge", "revolute",
-    base.at((0, DEPTH / 2, BASE_T)),    # the back edge of the deck's top face
-    lid.at(),                           # the lid's own origin, on its hinge line
-    axis=(-1, 0, 0),                    # positive angle lifts the lid's front edge
-    limits=(0.0, math.radians(135)),    # authored closed: 0 is shut
-)
+UPRIGHT = (math.pi / 2, 0, 0)  # profile x -> x, profile y -> z, extrusion along -y
 
-object_model = laptop
+mailbox = Assembly("mailbox")
+
+box = mailbox.body("box")  # the root: post, sheet-metal shell, back wall
+box.add("post", RoundedBoxGeometry((0.09, 0.09, POST_H), 0.01), xyz=(0, 0, -POST_H / 2))
+box.add("shell", ExtrudeWithHolesGeometry(arch(W, WALL_H), [arch(W, WALL_H, T)], DEPTH),
+        rpy=UPRIGHT)                                           # a hollow tunnel, open at both ends
+box.add("back", ExtrudeGeometry(arch(W, WALL_H), T), xyz=(0, DEPTH / 2 + T / 2, 0), rpy=UPRIGHT)
+
+# The flap's frame is on its hinge line: the front bottom edge of the shell.
+flap = mailbox.body("flap")
+flap.add("panel", ExtrudeGeometry(arch(W, WALL_H), T), xyz=(0, -T / 2, 0), rpy=UPRIGHT)
+flap.add("knob", LatheGeometry([(0, 0), (0.006, 0), (0.006, 0.006), (0.011, 0.014),
+                                (0.011, 0.02), (0, 0.022)]),
+         xyz=(0, -T, WALL_H + 0.03), rpy=UPRIGHT)               # lathe axis z -> out of the flap
+
+# The flag pivots on the right side wall; at rest its arm points to the front.
+flag = mailbox.body("flag")
+flag.add("hub", Cylinder(0.012, 0.004), xyz=(0.002, 0, 0), rpy=(0, math.pi / 2, 0))
+flag.add("arm", Box((0.004, 0.15, 0.012)), xyz=(0.002, -0.075, 0))
+flag.add("plate", Box((0.004, 0.05, 0.035)), xyz=(0.002, -0.125, 0.0235))
+
+mailbox.joint("flap_hinge", "revolute", box.at((0, -DEPTH / 2, 0)), flap.at(),
+              axis=(1, 0, 0),                    # positive: the top of the flap falls forward
+              limits=(0.0, math.radians(100)))
+mailbox.joint("flag_pivot", "revolute", box.at((W / 2, 0.12, 0.06)), flag.at(),
+              axis=(-1, 0, 0),                   # positive: the arm swings up
+              limits=(0.0, math.pi / 2))
+
+object_model = mailbox
 
 
 def run_tests(ctx):
-    ctx.expect_contact("base", "lid")                         # closed: the lid rests on the deck
-    ctx.expect_contact("base", "lid", pose={"hinge": math.radians(90)})  # still on its hinge
+    ctx.expect_contact("box", "flap", pose={"flap_hinge": math.radians(100)})  # still hinged
+    ctx.expect_contact("box", "flag", pose={"flag_pivot": math.pi / 2})
 ```
 
-Why it works: the lid is authored closed (lying on the deck), so 0 is a real pose; the hinge
-frame is on the shared edge, so the lid swings about it without passing through the base; the
-limits stop at a realistic 135°.
+Why it works: parts are authored closed, so 0 is a real pose; the flap's hinge is on the edge
+it shares with the shell, so it swings clear and stays in contact; the shell is a hollow 3 mm
+sheet, and shaped parts use helpers (arched extrusion, lathed knob, rounded post).
 
-## What the compiler checks
-
-Mesh health; every body connected (no floating parts); no overlap at rest; each joint swept over
-its range (and joints moved together) without collisions; hinged parts staying attached; loops
-that close over the driver's range; and your `run_tests`. Blocking failures stop the export and
-come back as `<compile_signals>` with a file, a line and a fix hint.
+The compiler checks mesh health, floating parts, overlap at rest, collisions over every
+joint's range, hinges that come apart, loops that cannot close, and your `run_tests`.

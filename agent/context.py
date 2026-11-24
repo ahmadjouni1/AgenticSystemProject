@@ -11,9 +11,13 @@ b. **Pinned state.** Per file, only the latest snapshot (a ``read`` result or a 
    content) is kept in full; older ones become a one-line stub. Only the latest compile
    signals are kept in full.
 c. **Docs already in context.** Reading ``docs/sdk/quickstart.md`` returns a short note: it is
-   the second system message. (Applied by the loop when the tool runs.)
+   the second system message. Reading a docs page again returns a note pointing to the turn
+   it was read at (its full text is still in the view, see d). (Applied by the loop when the
+   tool runs.)
 d. **Old tool outputs.** Results older than ``old_after_turns`` turns are cut to their first
-   lines plus a stub. ``probe`` and ``render`` results are kept: they are short and numeric.
+   lines plus a stub. Kept whole: ``probe`` and ``render`` results (short and numeric), and
+   the latest read of each file, workspace or docs page (step 10: a page shortened here was
+   read again, a wasted turn).
 e. **Compaction.** Above ``compact_above_tokens``, the middle of the conversation is
    summarized by the cheap model into a checkpoint (tried, failed, works, current main.py).
    The system prompts, the task and the last ``keep_recent_turns`` turns are kept.
@@ -95,6 +99,7 @@ class ContextPolicy:
         self._summary: User | None = None
         self._summary_upto = 0
         self.summaries: list[dict[str, Any]] = []
+        self._pages: dict[str, int] = {}  # docs page -> the turn its full read is from
 
     # -- events from the loop --
 
@@ -107,13 +112,22 @@ class ContextPolicy:
         """Rule c: the tool output to return instead of a doc already in context."""
         if not self.config.doc_notes or not isinstance(path, str):
             return None
-        key = path.strip().replace("\\", "/").lstrip("./")
+        key = _norm(path)
         where = DOCS_IN_CONTEXT.get(key)
+        if where is None and key in self._pages:
+            where = f"your read of it at turn {self._pages[key]}, kept in full"
         if where is None:
             return None
         self.hits["c_doc_notes"] += 1
         return {"path": key, "note": f"{key} is already in your context ({where}); use it "
                                      "from there instead of reading it again."}
+
+    def record_read(self, path: object, turn: int) -> None:
+        """A docs page was read in full at ``turn`` (called by the loop after the tool ran)."""
+        if self.config.doc_notes and isinstance(path, str):
+            key = _norm(path)
+            if key.startswith("docs/") and key.endswith(".md"):
+                self._pages.setdefault(key, turn)
 
     def _hit(self, rule: str, key: Any) -> None:
         if (rule, key) not in self._seen:
@@ -223,8 +237,7 @@ class ContextPolicy:
                 return replace(message, content=json.dumps(
                     {"path": data.get("path"), "note": f"[older read of {data.get('path')}, "
                                                        f"superseded at turn {later}]"}))
-            if not path.startswith("docs/"):
-                return message  # the latest snapshot of a workspace file stays whole
+            return message  # the latest read of a file or docs page stays whole
         if config.pin_state and name == "compile" and i < latest_compile \
                 and len(data.get("compile_signals", "")) > 80:
             self._hit("b_pinned_stubs", ("compile", message.call_id))
@@ -279,6 +292,8 @@ class ContextPolicy:
             f"<checkpoint kind=summary turns={turns[start]}-{turns[cut - 1]}>\n"
             f"{reply.text.strip()}\n\nCurrent main.py:\n```python\n{main}\n```\n</checkpoint>")
         self._summary_upto = cut
+        # Pages read in the summarized part are gone from the view: let them be read again.
+        self._pages = {k: t for k, t in self._pages.items() if t > turns[cut - 1]}
         self.hits["e_compactions"] += 1
         self.summaries.append({"turn": current_turn, "turns": [turns[start], turns[cut - 1]],
                                "cost": reply.cost, "chars": len(self._summary.content)})

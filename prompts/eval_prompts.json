@@ -1,0 +1,20 @@
+{
+  "_comment": "Every prompt used to evaluate the agent, by step. The docs examples must not build any of these objects (tests/test_docs.py).",
+  "step8": [
+    "a laptop that opens and closes",
+    "a drawer that slides out of a cabinet",
+    "a four-bar linkage"
+  ],
+  "step9": [
+    "a drawer that slides out of a cabinet",
+    "a four-bar linkage",
+    "a desk lamp with two hinged arms",
+    "a toolbox with a hinged lid and a sliding tray"
+  ],
+  "step10": [
+    "a kitchen cabinet with two doors and a drawer",
+    "a folding table",
+    "a crank-slider pump (crank, connecting rod, piston in a cylinder)",
+    "a pair of pliers"
+  ]
+}

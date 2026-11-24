@@ -272,3 +272,20 @@ def test_checks_for_all_examples_stay_within_budget() -> None:
     for name in EXAMPLES:
         check_example(name)
     assert time.perf_counter() - start < 3.0 * 2  # 3 s target; slack for slow CI machines
+
+
+def test_an_open_shape_is_reported_not_a_crash() -> None:
+    """Step 10 live run: a wire frame drawn as a closed polyline without ``closed_path`` is an
+    open tube. The debris check split it with trimesh's default repair, which needs networkx,
+    and the compile failed with "No module named 'networkx'" instead of a mesh finding."""
+    from sdk import wire_from_points
+
+    m = Assembly("open_frame")
+    base = m.body("base")
+    base.add("plate", Box((0.4, 0.4, 0.01)), xyz=(0, 0, -0.005))
+    base.add("frame", wire_from_points([(0, -0.1, 0.01), (0, 0.1, 0.01), (0, 0.1, 0.2),
+                                        (0, -0.1, 0.2), (0, -0.1, 0.01)], radius=0.01,
+                                       corner_radius=0.02))
+    report = run_checks(m)
+    assert any(f.check == "mesh_health" and "is open" in f.message and not f.blocking
+               for f in report.findings), report.text()

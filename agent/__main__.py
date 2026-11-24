@@ -15,7 +15,8 @@ import json
 import sys
 
 from agent.context import ContextConfig, ContextPolicy
-from agent.loop import MAX_TIME_S, MAX_TURNS, RUNS_ROOT, EffortPolicy, new_run_dir, run
+from agent.loop import (DEFAULT_PROMPT_SET, MAX_TIME_S, MAX_TURNS, PROMPT_SETS, RUNS_ROOT,
+                        EffortPolicy, new_run_dir, run)
 from llm import Budget, config, get_model, load_env
 
 
@@ -73,6 +74,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="wall-clock seconds per run")
     parser.add_argument("--lessons", action="store_true",
                         help="use and update runs/lessons.md (off by default)")
+    parser.add_argument("--prompt-set", choices=sorted(PROMPT_SETS), default=DEFAULT_PROMPT_SET,
+                        help="system prompt + quickstart + docs; v0 is step 9's")
+    parser.add_argument("--planning-effort", choices=["default", "low", "medium", "high"],
+                        default="default",
+                        help="reasoning effort before the first compile (with --effort adaptive)")
     args = parser.parse_args(argv)
     load_env()
     run_dir = new_run_dir(args.prompt, args.runs)
@@ -83,20 +89,26 @@ def main(argv: list[str] | None = None) -> int:
         context = ContextPolicy(ContextConfig(), get_model("cheap", run_dir=run_dir,
                                                            budget=budget),
                                 workspace=run_dir / "workspace")
-    effort = EffortPolicy() if args.effort == "adaptive" else None
+    planning = None if args.planning_effort == "default" else args.planning_effort
+    if planning is not None and args.effort != "adaptive":
+        parser.error("--planning-effort needs --effort adaptive")
+    effort = EffortPolicy(planning_effort=planning) if args.effort == "adaptive" else None
     print(f"run folder: {run_dir}\nmodel: {model.provider}/{model.model} (role {args.role}), "
           f"budget ${args.max_cost:.2f} / {args.max_calls} calls / {args.max_time:.0f} s, "
-          f"{args.max_turns} turns; context {args.context}, effort {args.effort}"
+          f"{args.max_turns} turns; context {args.context}, effort {args.effort}, prompt set "
+          f"{args.prompt_set}, planning effort {args.planning_effort}"
           + (", lessons on" if args.lessons else ""), flush=True)
     result = run(args.prompt, model, budget, args.max_turns, run_dir=run_dir,
                  on_event=print_event, context=context, effort=effort,
-                 max_time_s=args.max_time, lessons=args.lessons)
+                 max_time_s=args.max_time, lessons=args.lessons, prompt_set=args.prompt_set)
     record = result.record
     print(f"\n{result.status}: {result.reason}")
     print(json.dumps({k: record[k] for k in ("turns", "compiles", "cost_usd", "duration_s")}))
     print(f"tokens: {record['tokens']}")
     if record["context_policy"]:
         print(f"context policy hits: {record['context_policy']['hits']}")
+    if record["quality"]:
+        print(f"quality: {record['quality']}")
     print(f"run folder: {result.run_dir}\nview it: uv run python -m viewer {result.run_dir}")
     return 0 if result.status == "success" else 1
 

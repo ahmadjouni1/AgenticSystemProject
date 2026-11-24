@@ -65,8 +65,13 @@ uv run python -m viewer runs/<the run folder it prints>
 By default the agent uses the context policy (`--context v1`: checkpoints, pinned file
 state, compaction by the cheap model), low reasoning effort once the latest compile passed
 (`--effort adaptive`) and a 15-minute limit (`--max-time 900`). `--context none --effort
-default` gives the step 8 behaviour. Compare batches of runs with
-`uv run python scripts/context_report.py <runs folder> <runs folder>`.
+default` gives the step 8 behaviour. The model gets the step 10 system prompt and SDK docs
+(`--prompt-set v1`; `v0` is step 9's); `--planning-effort low` lowers the reasoning effort
+before the first compile. Compare batches of runs with
+`uv run python scripts/context_report.py <runs folder> <runs folder>`, or rerun the step 10
+experiment with `scripts/step10_experiment.py` and `scripts/step10_report.py`. Each run's
+`record.json` has quality metrics of its best build (bodies, shapes, joints, share of
+non-box shapes, helpers used, triangles), and `renders/final/` its 4 views.
 
 Call the agent's tools by hand (write, compile, render, probe) on the laptop and the drawer:
 
@@ -83,11 +88,11 @@ uv run python scripts/tools_demo.py
 | `examples/` | 8 articulated objects: laptop, four-bar, gantry, toaster, door hinge, desk lamp, computer mouse, folding chair |
 | `viewer/` | `python -m viewer <run>`: a local web page with a version picker, joint sliders, Play, and compile signals shown at the pose where they happen |
 | `llm/` | The LLM client: one `query(messages, tools) -> Reply` protocol, OpenAI and DeepSeek via the `openai` package, usage and cost per call, per-run budget, retries, a call log, and `ScriptedModel` for tests. Roles and prices are in `llm/config.py` |
-| `prompts/` | The system prompt, and the starter `main.py` for each run |
+| `prompts/` | The system prompt (v1), step 9's frozen prompt and docs (`v0/`), the starter `main.py`, and every evaluation prompt (`eval_prompts.json`) |
 | `agent/` | The agent loop (`python -m agent`: turns, stop rule, end states, run folder with `record.json`) and its tools: `read`, `write`, `edit`, `compile`, `render` (CPU PNG views), `probe` (positions, gaps, collisions at a pose). Structured errors, workspace-only paths, no shell |
 | `tests/` | pytest suite, with a small standalone URDF forward-kinematics reader |
 | `scripts/` | Benchmarks and the generator for `docs/SHAPE_HELPERS.md` |
-| `docs/` | The Articraft study and the ranked table of its shape helpers |
+| `docs/` | The Articraft study, the ranked table of its shape helpers, and `docs/sdk/`: the agent's SDK docs (quickstart with a complete example, shapes, joints and loops, testing; every example is compiled by the tests) |
 
 ## Build status
 
@@ -104,7 +109,7 @@ The steps follow the parts of the original listed in the study.
 | 7 | Agent tools: read, write, edit, compile, render, probe; structured errors; path scoping; output cap; fixed schema order | Done |
 | 8 | Agent loop: prompts v0, stop rule (fresh passing compile), end states, best build, run folder with conversation and per-turn record, CLI | Done |
 | 9 | Context and memory: checkpoints (old reasoning not re-sent), pinned file state, doc notes, old-output shortening, compaction, reasoning cap on routine turns, wall-clock budget, optional lessons file; measured before/after | Done |
-| 10 | System prompt and SDK docs | Next |
+| 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment pending (provider out of credit) | In progress |
 | 11 | Run storage | Planned |
 | 12 | Evaluation | Planned |
 | 13 | Extras (images, simulation, trajectories) | Planned |

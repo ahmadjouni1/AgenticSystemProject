@@ -257,3 +257,37 @@ def test_missing_source_file_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         export(module("laptop").build(), tmp_path, source=tmp_path / "nope.py")
     assert list(tmp_path.iterdir()) == []
+
+
+# ---- step 10 regressions ----------------------------------------------------------------------
+
+
+def test_simplifying_a_thin_shell_keeps_it_solid() -> None:
+    """A 3 mm sheet-metal tunnel: doubling the simplify tolerance used to collapse its walls
+    to nothing ("simplify produced an empty result")."""
+    from sdk import ExtrudeWithHolesGeometry
+    from sdk.export import _simplify
+
+    def ring(r, n=200):
+        return [(r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n))
+                for i in range(n)]
+
+    shell = ExtrudeWithHolesGeometry(ring(0.09), [ring(0.087)], 0.46).to_trimesh(process=True)
+    assert shell.is_watertight
+    reduced, method = _simplify(shell, budget=100)
+    assert len(reduced.faces) > 0
+    assert abs(reduced.volume - shell.volume) <= 0.1 * shell.volume
+    assert method in {"manifold_simplify", "copy"}
+
+
+def test_loading_a_mesh_with_an_open_piece_needs_no_repair() -> None:
+    """viewer.loader splits body meshes into pieces; an open piece must not trigger trimesh's
+    hole filling (it needs networkx, which is not a dependency, and changes the geometry)."""
+    from viewer.loader import _pieces
+
+    closed = trimesh.creation.box((1, 1, 1))
+    open_piece = trimesh.Trimesh(vertices=[[3, 0, 0], [4, 0, 0], [3, 1, 0], [4, 1, 1]],
+                                 faces=[[0, 1, 2], [1, 3, 2]])
+    pieces = _pieces(trimesh.util.concatenate([closed, open_piece]))
+    assert len(pieces) == 2
+    assert sorted(len(p.faces) for _n, p in pieces) == [2, 12]

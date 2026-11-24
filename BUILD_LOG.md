@@ -2837,3 +2837,80 @@ The DeepSeek balance is about **$12** and cannot be topped up again. It is split
 - **`--off-peak-only`** (added for this run) starts no run at DeepSeek's peak price
   (01-04 and 06-10 UTC on weekdays, double the off-peak rate). Runs already going finish,
   and a rerun of the same command resumes and starts the rest.
+
+<!-- eval_v1 -->
+### Evaluation eval_v1 (benchmark_v1)
+
+From `scripts/eval_report.py --name v1`; the full report is `runs/eval_v1/report.md`.
+
+#### Success (Wilson 95% intervals)
+
+11 counted runs, 1-2 per prompt (2 prompts with none). With so few runs per category the intervals are wide: **indicative only**, not a measured difference.
+
+| category | success | rate | 95% interval |
+| --- | --- | --- | --- |
+| single (a single hinge or slide) | 3/3 | 100% | 44%-100% |
+| chain (multi-joint open chains) | 2/2 | 100% | 34%-100% |
+| independent (several independent joints) | 2/2 | 100% | 34%-100% |
+| loop (closed loops) | 0/2 | 0% | 0%-66% |
+| tool (everyday tools and mechanisms) | 2/2 | 100% | 34%-100% |
+| **overall** | 9/11 | 82% | 52%-95% |
+
+#### Cost, time and turns (per run, means)
+
+| category | runs | cost / run | cost / success | time / run | turns | failed compiles | spent |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| single | 3 | $0.052 | $0.052 | 256 s | 9.7 | 1.3 | $0.155 |
+| chain | 2 | $0.200 | $0.200 | 1049 s | 23.5 | 4.0 | $0.400 |
+| independent | 2 | $0.134 | $0.134 | 657 s | 10.5 | 1.0 | $0.268 |
+| loop | 2 | $0.268 | - | 1485 s | 11.5 | 2.5 | $0.537 |
+| tool | 2 | $0.107 | $0.107 | 541 s | 9.5 | 0.5 | $0.214 |
+| **overall** | 11 | $0.143 | $0.175 | 748 s | 12.6 | 1.8 | $1.574 |
+
+#### Failure end states
+
+| end state | runs |
+| --- | --- |
+| no_progress | 1 |
+| time_exceeded | 1 |
+
+#### Failure kinds
+
+Runs with at least one failed compile of each kind (all runs), and the kind of the last failed compile of each failed run.
+
+| kind | runs with it | last failure of a failed run |
+| --- | --- | --- |
+| validation | 4 | 0 |
+| overlap | 3 | 1 |
+| mesh_health | 1 | 0 |
+| runtime_error | 1 | 0 |
+| separation | 1 | 0 |
+| swept_collision | 1 | 0 |
+| test_failure | 1 | 0 |
+<!-- /eval_v1 -->
+
+### What happened in eval_v1 (2026-11-24, 15:59-17:02 UTC, off-peak)
+
+- **Stopped by HTTP 402 after $2.09 of tracked spend,** 14 runs in (36 planned). The
+  provider returned "Insufficient Balance" to 3 runs mid-run: excavator_arm-r1,
+  pantograph-r1 and robot_arm-r2. `eval.py` then started no new run.
+- **The balance was not $12.** DeepSeek's balance endpoint (`GET /user/balance`, no tokens
+  used) afterwards reported **−$0.04 USD** (`is_available: false`). So the account held
+  about $2.05 when the evaluation started, about the "$2 left" of step 12. The $12 in the
+  budget plan above was never available; that plan cannot be carried out until the balance
+  is confirmed.
+- **Our cost accounting agrees with the provider's:** $2.09 tracked against a drop to
+  −$0.04 from about $2, so within about $0.05. The price table (off-peak at half price) is
+  confirmed by money actually spent.
+- **Counted:** 11 runs; 9 success, 1 time_exceeded (windshield_wipers-r1), 1 no_progress
+  (scissor_lift-r1). Every prompt except the loops succeeded at least once.
+  - **No closed-loop success yet,** 0 of 2 counted.
+  - **The scissor lift failed like step 10b's pump:** 3 replies cut off at the output limit
+    while planning, and `main.py` was never written.
+  - **The wipers** spent the 25 minutes on overlap failures.
+- **Not counted:** the 3 runs cut off by the 402 are listed in the report as interrupted
+  ($0.51). The 22 not started remain, mostly repetitions 2 and 3. A rerun of the same
+  command resumes the interrupted ones with what is left of their allowance, and starts the
+  rest.
+- **Blind rating:** 9 sheets in `runs/rating_v1/sheets/`, to fill in
+  `runs/rating_v1/ratings.csv`.

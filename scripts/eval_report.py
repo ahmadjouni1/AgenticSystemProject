@@ -8,6 +8,10 @@ Writes ``runs/eval_<name>/report.md`` and one render sheet per category in
 prompt id and the end state). The key tables (success, cost and time, failures) also go to
 BUILD_LOG.md, between ``<!-- eval_<name> -->`` markers: a second report replaces them.
 
+Runs cut off by something outside the agent (``interrupted``: HTTP 402 out of credit, a
+connection failure, a crash) are not counted in any table; they are listed with what they
+cost, and a rerun of scripts/eval.py resumes them.
+
 Success rates come with Wilson 95% confidence intervals. With 1 run per prompt (2-3 per
 category) they are wide: the numbers are indicative only.
 """
@@ -89,11 +93,32 @@ def load(eval_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         run_dir = found[0] if found else None
         record = storage.read_record(run_dir) if run_dir else None
         status = storage.status_of(run_dir, record) if record else "not_started"
+        why = interrupted(status, record)
         rows.append({**by_id[match.group(1)], "rep": int(match.group(2)), "run_dir": run_dir,
-                     "record": record, "status": status})
+                     "record": None if why else record, "status": status,
+                     "interrupted": why, "interrupted_record": record if why else None})
     order = {p["id"]: i for i, p in enumerate(benchmark["prompts"])}
     rows.sort(key=lambda r: (order[r["id"]], r["rep"]))
     return benchmark, rows
+
+
+INTERRUPTIONS = ("HTTP 402", "Insufficient Balance", "APIConnectionError",
+                 "failed after", "APITimeoutError")
+
+
+def interrupted(status: str, record: dict[str, Any] | None) -> str | None:
+    """Why a run was cut off by something outside the agent, or None."""
+    if record is None:
+        return None
+    if status in ("crashed", "running"):
+        return status
+    reason = record.get("reason") or ""
+    if status == "error":
+        for mark in INTERRUPTIONS:
+            if mark in reason:
+                return "out of credit (HTTP 402)" if mark in INTERRUPTIONS[:2] else \
+                    "connection failure"
+    return None
 
 
 def failure_kinds(record: dict[str, Any]) -> list[str]:
@@ -146,7 +171,8 @@ def per_run_rows(rows: list[dict[str, Any]]) -> list[list[str]]:
         record = r["record"] or {}
         best = record.get("best") or {}
         kinds = failure_kinds(record) if record else []
-        out.append([f"{r['id']}-r{r['rep']}", r["category"], r["status"],
+        state = f"interrupted: {r['interrupted']}" if r["interrupted"] else r["status"]
+        out.append([f"{r['id']}-r{r['rep']}", r["category"], state,
                     str(record.get("turns", "-")),
                     f"${record['cost_usd']:.3f}" if record.get("cost_usd") is not None
                     else "-",
@@ -197,8 +223,12 @@ def quality_rows(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[
 def key_tables(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[str]:
     done = [r for r in rows if r["record"]]
     reps = Counter((r["id"]) for r in done)
-    per_prompt = max(reps.values(), default=0)
-    note = (f"{len(done)} runs, {per_prompt} per prompt. With so few runs per category the "
+    low, high = min(reps.values(), default=0), max(reps.values(), default=0)
+    per_prompt = str(low) if low == high else f"{low}-{high}"
+    missing = len({r["id"] for r in rows} - set(reps))
+    note = (f"{len(done)} counted runs, {per_prompt} per prompt"
+            + (f" ({missing} prompts with none)" if missing else "")
+            + ". With so few runs per category the "
             "intervals are wide: **indicative only**, not a measured difference.")
     return ["## Success (Wilson 95% intervals)\n", note + "\n",
             table(["category", "success", "rate", "95% interval"],
@@ -223,6 +253,19 @@ def report(name: str, benchmark: dict[str, Any], rows: list[dict[str, Any]],
                     "best build", "failed compile kinds"], per_run_rows(rows)),
              "\n## Render sheets (iso view of each run's best build)\n",
              "\n".join(f"- {c}: `{p.name}`" for c, p in sheets.items()) or "None."]
+    cut = [r for r in rows if r["interrupted"]]
+    if cut:
+        spent = sum(float(r["interrupted_record"].get("cost_usd") or 0) for r in cut)
+        parts.append("\n## Interrupted runs (not counted)\n")
+        parts.append(table(["run", "why", "turns", "cost", "best build"], [
+            [f"{r['id']}-r{r['rep']}", r["interrupted"],
+             str(r["interrupted_record"].get("turns", "-")),
+             f"${float(r['interrupted_record'].get('cost_usd') or 0):.3f}",
+             ((r["interrupted_record"].get("best") or {}).get("version") or "-")]
+            for r in cut]))
+        parts.append(f"\n{len(cut)} runs, ${spent:.3f}; a rerun of scripts/eval.py "
+                     "resumes them.")
+    not_run = [n for n in not_run if not any(f"{r['id']}-r{r['rep']}" == n for r in cut)]
     if not_run:
         parts.append(f"\nNot run (yet): {', '.join(not_run)}.")
     return "\n".join(parts) + "\n"

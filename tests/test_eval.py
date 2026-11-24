@@ -247,6 +247,15 @@ def test_the_main_dry_run_prints_the_plan_and_the_worst_case(tmp_path, capsys) -
 # ---- eval_report.py -----------------------------------------------------------------------------
 
 
+def test_runs_cut_off_from_outside_are_not_counted() -> None:
+    out_of_credit = {"reason": "model call failed: deepseek refused the request (HTTP 402): "
+                               "Insufficient Balance; best build: result/last_failed"}
+    assert eval_report.interrupted("error", out_of_credit) == "out of credit (HTTP 402)"
+    assert eval_report.interrupted("crashed", {}) == "crashed"
+    assert eval_report.interrupted("error", {"reason": "ValueError: a loop bug"}) is None
+    assert eval_report.interrupted("time_exceeded", out_of_credit) is None
+
+
 def test_wilson_intervals() -> None:
     low, high = eval_report.wilson(0, 3)
     assert low == 0 and high == pytest.approx(0.5615, abs=1e-4)

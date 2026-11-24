@@ -2959,3 +2959,50 @@ Runs with at least one failed compile of each kind (all runs), and the kind of t
 - **Blind rating:** `runs/rating_v1` was remade with all 26 successes. The earlier 9-item sheet
   had no ratings and was replaced. Fill in `runs/rating_v1/ratings.csv`, then run
   `uv run python scripts/eval_rating.py score runs/rating_v1`.
+
+### Articraft baseline: set up in WSL, dry run (2026-11-24, no paid runs)
+
+- **WSL.**
+  - **What was there:** WSL 2.6.1 was installed and working, with only Docker Desktop's
+    `docker-desktop` distribution.
+  - **Ubuntu 26.04 added** with `wsl --install -d Ubuntu --no-launch`. WSL was already
+    enabled, so no admin and no reboot.
+  - **The Linux user:** `user` was created without a password as the default user (in
+    `/etc/wsl.conf`), so the setup needed no interactive prompt.
+  - **Then:** uv 0.13.10 installed in WSL, and Articraft copied to `~/articraft`, leaving out
+    `runs/` and `.venv/`. "Previous work" was only read.
+- **Setup problem: Python 3.14.** `uv sync` picked Ubuntu's Python 3.14, and `xatlas` has no
+  3.14 wheel (its source build fails). Fixed with `uv python pin 3.13` in the WSL copy. Its
+  `.venv` now runs Python 3.13.18.
+- **Script fixes found by running it for real:**
+  - **The missing subcommand:** the Articraft CLI needs `generate` (`articraft generate
+    --no-tui ...`). Without it every run would have failed at once.
+  - **`--off-peak-only`:** no run starts if it could reach the peak hours before its
+    25-minute limit.
+  - **The total cap counts the overshoot:** a run starts only if the cap holds even when the
+    run ends at its $0.30 cap plus a full reply in flight (about $0.08 off-peak).
+  - **Reruns count earlier money:** a rerun of an `error` job keeps the earlier attempt's
+    record (`record.NN.json`), and its cost still counts.
+  - **The dry run** now prints the plan, the estimate, the price period, whether a run may
+    start now, and the balance (free endpoint).
+  - **Tests:** 3 new; 22 eval tests pass.
+- **Checked against Articraft's source:**
+  - `record.json` is saved after every model call, so the 5 s cost poll works.
+  - Its DeepSeek token keys match `cost_of`, cache hits included in `input_tokens`.
+  - The model name is passed to the API unchanged.
+  - The key comes from `DEEPSEEK_API_KEY`, and there is no `.env` in the copy.
+  - A cut-off reply (`finish_reason: length`) ends its run as an error.
+- **Free end-to-end check:** one stapler run with an invalid key got HTTP 401, after
+  `messages=3, tools=8`, at $0. It confirmed:
+  - the WSL launch and passing the key in through WSLENV;
+  - the run folder, with Articraft's `workspace/docs/sdk` symlink, written on `/mnt/c`;
+  - the record conversion (`error`, with the reason).
+
+  The folder was deleted afterwards.
+- **Dry run** (`--max-total 3 --off-peak-only`, Tue 21:33 UTC):
+  - **Plan:** 12 runs, one at a time.
+  - **Estimate:** our builder averaged $0.165 per run on this benchmark, so about $1.98 for
+    12. Articraft sends effort high on every turn, so expect more.
+  - **Worst case:** at most $0.38 per run, so at least 7 of 12 runs start under $3.
+  - **Balance:** $6.05. That is $3.81 below the $9.86 after the top-up, exactly our tracked
+    spend; the $6.10 read right after the evaluation was lagging.

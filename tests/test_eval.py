@@ -380,7 +380,8 @@ def test_the_wsl_command_carries_no_key(tmp_path) -> None:
     j = job(tmp_path)
     argv = baseline.command(j, s)
     assert argv[:5] == ["wsl.exe", "-d", "Ubuntu", "--", "bash"]
-    assert "--provider deepseek --model deepseek-v4-pro --effort high" in argv[-1]
+    assert "uv run articraft generate --no-tui --provider deepseek --model deepseek-v4-pro " \
+           "--effort high" in argv[-1]
     assert "'a stapler'" in argv[-1]
     env = baseline.environment(s, {"DEEPSEEK_API_KEY": "secret-value", "WSLENV": "X/p"})
     assert "secret-value" not in " ".join(argv)
@@ -471,3 +472,42 @@ def test_the_watcher_stops_articraft_past_the_cost_cap_or_the_time_limit(tmp_pat
     why, seconds = baseline.watch(other, process, s, stop, clock=lambda: now[0],
                                   sleep=lambda x: now.__setitem__(0, now[0] + 100))
     assert why == "time" and seconds > 1500
+
+
+def test_the_baseline_starts_no_run_that_could_pass_the_total_or_reach_peak(tmp_path) -> None:
+    s = baseline.Settings("articraft", runs_root=tmp_path, max_cost=0.30, max_time=1500,
+                          off_peak_only=True)
+    evening = datetime(2026, 11, 24, 21, 0, tzinfo=UTC)  # a Tuesday, off-peak
+    worst = 0.30 + baseline.overshoot(evening)
+    assert 0.05 < baseline.overshoot(evening) < 0.10
+    assert baseline.may_start(s, 0.0, 3.0, evening) is None
+    assert "total cap" in baseline.may_start(s, 3.0 - worst + 0.01, 3.0, evening)
+    late = datetime(2026, 11, 25, 0, 40, tzinfo=UTC)  # peak at 01:00, within 25 minutes
+    assert "peak price" in baseline.may_start(s, 0.0, 3.0, late)
+    s.off_peak_only = False
+    assert baseline.may_start(s, 0.0, 3.0, late) is None
+
+
+def test_a_rerun_keeps_the_failed_attempt_and_counts_its_cost(tmp_path) -> None:
+    j = job(tmp_path)
+    j.folder.mkdir(parents=True)
+    (j.folder / "record.json").write_text(json.dumps({"status": "error", "cost_usd": 0.12}),
+                                          encoding="utf-8")
+    assert baseline.spent_so_far([j]) == pytest.approx(0.12)
+    baseline.keep_earlier_attempt(j)
+    assert not (j.folder / "record.json").exists()
+    (j.folder / "record.json").write_text(json.dumps({"status": "success", "cost_usd": 0.2}),
+                                          encoding="utf-8")
+    assert [p.name for p in baseline.attempts(j)] == ["record.01.json", "record.json"]
+    assert baseline.spent_so_far([j]) == pytest.approx(0.32)
+
+
+def test_the_baseline_dry_run_shows_plan_estimate_and_balance(tmp_path) -> None:
+    s = baseline.Settings("articraft", runs_root=tmp_path, benchmark=BENCHMARK,
+                          off_peak_only=True)
+    jobs = eval_script.plan(eval_script.load_benchmark(BENCHMARK), s.eval_dir, 1)
+    text = baseline.dry_run(s, jobs, 3.0, balance=lambda: "9.99 USD (available: True)",
+                            now=datetime(2026, 11, 24, 21, 0, tzinfo=UTC))
+    assert len(re.findall(r" start$", text, re.M)) == 12 and "articraft generate" in text
+    assert "start now: yes" in text and "DeepSeek balance: 9.99 USD" in text
+    assert "7 of 12 runs start even if every run ends at" in text

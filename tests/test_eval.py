@@ -221,6 +221,21 @@ def test_http_402_stops_new_runs(tmp_path) -> None:
     assert len(seen) == 1 and "402" in summary["stopped"]
 
 
+def test_off_peak_only_starts_no_run_at_peak_price(tmp_path, monkeypatch) -> None:
+    s = settings(tmp_path, off_peak_only=True)
+    real_peak_now = eval_script.peak_now
+    peak = iter([False, True, True])  # the second run would start at peak price
+    monkeypatch.setattr(eval_script, "peak_now", lambda at=None: next(peak))
+    seen: list[float] = []
+    summary = eval_script.run_eval(s, fake_launcher(0.01, seen), log=lambda text: None)
+    assert len(seen) == 1 and summary["stopped"].startswith("peak price")
+    assert [j["status"] for j in summary["jobs"]] == ["success", "not_started", "not_started"]
+    from datetime import UTC, datetime
+
+    assert real_peak_now(datetime(2026, 11, 25, 1, 30, tzinfo=UTC))  # a Wednesday
+    assert not real_peak_now(datetime(2026, 11, 24, 16, 0, tzinfo=UTC))
+
+
 def test_the_main_dry_run_prints_the_plan_and_the_worst_case(tmp_path, capsys) -> None:
     assert eval_script.main(["--name", "x", "--dry-run", "--runs-root",
                              str(tmp_path)]) == 0

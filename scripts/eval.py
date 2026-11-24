@@ -22,7 +22,9 @@ reply). Spend counts every run of this evaluation, earlier invocations included.
 HTTP 402) are resumed with ``--resume`` and what is left of their allowance (cost and time),
 at most ``MAX_SESSIONS`` sessions per run. Runs not started yet are started.
 
-**Stops.** No run starts after one gets HTTP 402 (out of credit). Windows is kept awake while
+**Stops.** No run starts after one gets HTTP 402 (out of credit). With ``--off-peak-only``
+no run starts at DeepSeek's peak price (01-04 and 06-10 UTC, Monday to Friday: twice the
+off-peak rate); runs already going finish, and a rerun later starts the rest. Windows is kept awake while
 the script runs. ``--jobs 2`` by default: DeepSeek lowers concurrency on a low balance.
 """
 
@@ -197,6 +199,7 @@ class Settings:
     agent_args: list[str] = field(default_factory=list)
     runs_root: Path = RUNS_ROOT
     benchmark: Path = BENCHMARK
+    off_peak_only: bool = False
 
     @property
     def eval_dir(self) -> Path:
@@ -250,6 +253,11 @@ class Evaluation:
                     argv = [job.prompt, "--runs", str(job.folder), "--index", str(s.index),
                             "--max-cost", str(allowance), "--max-time", str(s.max_time),
                             *s.agent_args]
+                if s.off_peak_only and peak_now():
+                    self.queue.insert(0, job)
+                    self.stop = (f"peak price: DeepSeek's peak hours began "
+                                 f"({price_note()}); rerun later to start the rest")
+                    break
                 if self.committed() + allowance > s.max_total + 1e-9:
                     self.queue.insert(0, job)
                     if self.reserved:  # a run in flight may end under its reservation
@@ -367,6 +375,16 @@ def dry_run(settings: Settings) -> str:
     return "\n".join(lines)
 
 
+def peak_now(at=None) -> bool:
+    """Whether deepseek-v4-pro is at its full (peak) price now."""
+    from datetime import UTC, datetime
+
+    from llm import config
+
+    off_peak = config.PRICES["deepseek-v4-pro"].off_peak
+    return off_peak is not None and off_peak.factor(at or datetime.now(UTC)) >= 1
+
+
 def price_note(at=None) -> str:
     """DeepSeek's price right now: off-peak rates are half (llm/config.py)."""
     from datetime import UTC, datetime
@@ -399,10 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-args", default="",
                         help='extra arguments for new runs, e.g. "--two-phase"')
     parser.add_argument("--dry-run", action="store_true", help="print the plan; run nothing")
+    parser.add_argument("--off-peak-only", action="store_true",
+                        help="start no run at DeepSeek's peak price (runs going finish)")
     args = parser.parse_args(argv)
     settings = Settings(args.name, args.runs, args.jobs, args.max_cost, args.max_total,
                         args.max_time, args.only, args.agent_args.split(),
-                        Path(args.runs_root).resolve(), Path(args.benchmark).resolve())
+                        Path(args.runs_root).resolve(), Path(args.benchmark).resolve(),
+                        args.off_peak_only)
     if args.dry_run:
         print(dry_run(settings))
         return 0

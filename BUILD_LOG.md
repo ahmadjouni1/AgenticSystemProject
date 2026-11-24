@@ -2820,3 +2820,20 @@ started.
   WSL.
 - **More runs per prompt** (3) would make the category numbers mean something: about $5 at
   off-peak prices.
+
+### Budget plan (2026-11-24)
+
+The DeepSeek balance is about **$12** and cannot be topped up again. It is split as follows:
+
+| Use | Budget | When |
+| --- | --- | --- |
+| Our benchmark: `eval.py --name v1 --runs 3 --jobs 3 --max-total 5 --off-peak-only` (12 prompts × 3 runs) | $5 | now |
+| The Articraft baseline (`scripts/articraft_baseline.py`) | $3 | later |
+| Re-testing the slider-crank / closed-loop solver | $2 | later |
+| Safety margin | $2 | kept |
+
+- **The eval's own cap holds its share:** `--max-total` starts no run that could take the
+  evaluation past its $5 share.
+- **`--off-peak-only`** (added for this run) starts no run at DeepSeek's peak price
+  (01-04 and 06-10 UTC on weekdays, double the off-peak rate). Runs already going finish,
+  and a rerun of the same command resumes and starts the rest.

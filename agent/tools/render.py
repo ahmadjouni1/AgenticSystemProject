@@ -17,6 +17,8 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw
 
+from fileio import atomic_write_bytes
+
 from agent.tools.builds import (POSE_SCHEMA, Build, joint_report, newest_build, round_list,
                                 solve_pose, world_meshes)
 from agent.tools.core import AgentTool, ToolContext, ToolError
@@ -255,6 +257,15 @@ def _next_folder(ctx: ToolContext):
     return folder
 
 
+def save_png(image: Image.Image, path: Path) -> None:
+    """Save a PNG atomically (a crash never leaves half an image)."""
+    import io
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    atomic_write_bytes(path, buffer.getvalue())
+
+
 def run_render(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     names = args.get("views") or list(VIEW_NAMES)
     if len(set(names)) != len(names):
@@ -268,7 +279,7 @@ def run_render(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     for view in names:
         forward, right, label = directions[view]
         path = folder / f"{view}.png"
-        rasterize(meshes, forward, f"{build.label}  {label}", right).save(path)
+        save_png(rasterize(meshes, forward, f"{build.label}  {label}", right), path)
         images.append({"view": view, "path": path.relative_to(ctx.run_dir).as_posix(),
                        "label": label})
     bodies = {}

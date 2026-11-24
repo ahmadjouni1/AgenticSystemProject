@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from agent.tools.core import AgentTool, ToolContext, ToolError, resolve
+from fileio import atomic_write_text
 
 DEFAULT_LINES = 400
 MAX_LINES = 2_000
@@ -89,7 +90,7 @@ def run_write(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         raise ToolError("bad_arguments", f"{target.display} is a folder", "give a file path")
     created = not target.path.exists()
     target.path.parent.mkdir(parents=True, exist_ok=True)
-    target.path.write_text(content, encoding="utf-8", newline="\n")
+    atomic_write_text(target.path, content, newline="\n")  # never half a main.py
     return {"path": target.display, "created": created,
             "bytes": len(content.encode("utf-8")), "lines": len(content.splitlines())}
 
@@ -159,7 +160,7 @@ def run_edit(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                             "include more surrounding lines so it matches exactly once")
         text = text.replace(old, new, 1)
     if text != original:
-        target.path.write_text(text, encoding="utf-8", newline="\n")
+        atomic_write_text(target.path, text, newline="\n")
     return {"path": target.display, "replaced": len(edits),
             "bytes": len(text.encode("utf-8")), "lines": len(text.splitlines())}
 

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from fileio import append_line, read_jsonl
 from llm import config
 from llm.protocol import UNKNOWN, BudgetExceeded, Cost, Reply, Usage
 
@@ -101,15 +102,10 @@ class CallLog:
     def append(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, ensure_ascii=False, default=str)
         with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            append_line(self.path, line)
 
     def records(self) -> list[dict[str, Any]]:
-        if not self.path.is_file():
-            return []
-        return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
+        return read_jsonl(self.path)  # skips a last line cut short by a crash
 
     def summary(self) -> dict[str, Any]:
         """Totals over the log: calls, tokens, known cost, unknown-cost calls, cached share."""

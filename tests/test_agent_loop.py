@@ -294,8 +294,9 @@ def test_cli_runs_and_prints_the_run_folder(tmp_path, monkeypatch, capsys) -> No
     assert "turn   1  write(main.py)" in out and "-> compile success v0000" in out
     assert "success: finished after a passing, fresh compile" in out
     assert "python -m viewer" in out
-    (folder,) = list(tmp_path.iterdir())
+    (folder,) = [p for p in tmp_path.iterdir() if p.is_dir()]
     assert folder.name.endswith("-a-laptop-that-opens-and-closes")
+    assert (tmp_path / "index.jsonl").is_file()  # step 11: the runs folder's index
 
 
 def test_a_reply_cut_off_at_the_output_limit_says_so(tmp_path) -> None:

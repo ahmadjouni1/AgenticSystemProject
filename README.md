@@ -60,14 +60,17 @@ environment or `replica/.env`):
 ```shell
 uv run python -m agent "a drawer that slides out of a cabinet"
 uv run python -m viewer runs/<the run folder it prints>
+uv run python -m agent --resume runs/<a stopped run> --max-time 900   # continue it
+uv run python -m agent --list runs                                     # status, cost, best
 ```
 
 By default the agent uses the context policy (`--context v1`: checkpoints, pinned file
 state, compaction by the cheap model), low reasoning effort once the latest compile passed
 (`--effort adaptive`) and a 25-minute limit (`--max-time 1500`; at the limit, a passing,
 fresh build gets one final turn and counts as a success; no fix cycle starts with less than
-`--fix-reserve 120` seconds left). `--two-phase` asks for a skeleton that must pass every
-check before the detail. `--context none --effort default` gives the step 8 behaviour. The model gets the step 10 system prompt and SDK docs
+`--fix-reserve 120` seconds left; every model call is capped at the time left). This is
+step 10b's B2 setup. `--two-phase` is an optional high-detail mode: a skeleton that must
+pass every check, then the detail. `--context none --effort default` gives the step 8 behaviour. The model gets the step 10 system prompt and SDK docs
 (`--prompt-set v1`; `v0` is step 9's); `--planning-effort low` lowers the reasoning effort
 before the first compile. Compare batches of runs with
 `uv run python scripts/context_report.py <runs folder> <runs folder>`, or rerun the step 10
@@ -75,6 +78,12 @@ experiment with `scripts/step10_experiment.py` and `scripts/step10_report.py` (s
 `scripts/step10b_experiment.py`, then `step10_report.py --folder runs/step10b --variants B2 D`). Each run's
 `record.json` has quality metrics of its best build (bodies, shapes, joints, share of
 non-box shapes, helpers used, triangles), and `renders/final/` its 4 views.
+
+A run that stopped (time, budget, a crash) continues with `--resume <run folder>`, from its
+`conversation.jsonl` and workspace, with a new `--max-time` / `--max-cost` / `--max-calls`
+/ `--max-turns`; the rest of the setup comes from its `record.json`, which keeps one entry
+per session. Each finished session adds a line to `runs/index.jsonl`. Files a crash could
+cut short are written atomically.
 
 Call the agent's tools by hand (write, compile, render, probe) on the laptop and the drawer:
 
@@ -114,7 +123,7 @@ The steps follow the parts of the original listed in the study.
 | 9 | Context and memory: checkpoints (old reasoning not re-sent), pinned file state, doc notes, old-output shortening, compaction, reasoning cap on routine turns, wall-clock budget, optional lessons file; measured before/after | Done |
 | 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment (more detailed objects; planning reasoning not reduced) | Done |
 | 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` (optional high-detail mode); every model call capped at the time left | Done: B2 (the new default) 10/12 at $0.137 per success; D (two-phase) 9/12 at $0.194, more detail |
-| 11 | Run storage | Planned |
+| 11 | Run storage: messages to and from dicts, `--resume` (time_exceeded, budget_exceeded, a crash) with a new allowance and a list of sessions, `--list`, `runs/index.jsonl`, atomic writes | Done |
 | 12 | Evaluation | Planned |
 | 13 | Extras (images, simulation, trajectories) | Planned |
 

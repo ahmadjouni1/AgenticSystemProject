@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from compiler import feedback
+from fileio import append_line, atomic_write_text
 from compiler.feedback import CompileSignal
 from compiler.worker import HANG_FILE, PROGRESS_FILE
 
@@ -311,7 +312,7 @@ def _cached(result_dir: Path, digest: str, timeout: float) -> CompileResult | No
 
 
 def _write_cache(result_dir: Path, result: CompileResult, timeout: float, summary: str) -> None:
-    (result_dir / CACHE_FILE).write_text(json.dumps({
+    atomic_write_text(result_dir / CACHE_FILE, json.dumps({
         "digest": result.digest, "toolchain": toolchain_digest(), "timeout": timeout,
         "status": result.status, "summary": summary,
         "signals": [s.to_dict() for s in result.signals], "signals_text": result.signals_text,
@@ -319,7 +320,7 @@ def _write_cache(result_dir: Path, result: CompileResult, timeout: float, summar
         "export_dir": str(result.export_dir) if result.export_dir else None,
         "phase": result.phase, "phases": result.phases, "returncode": result.returncode,
         "repeat_count": result.repeat_count,
-    }, indent=2), encoding="utf-8")
+    }, indent=2))
 
 
 def _record_history(result_dir: Path, signals: list[CompileSignal]) -> int:
@@ -328,7 +329,7 @@ def _record_history(result_dir: Path, signals: list[CompileSignal]) -> int:
     history = _read_json(path).get("signatures", [])
     signature = feedback.failure_signature(signals)
     history = [*history, signature][-50:]
-    path.write_text(json.dumps({"signatures": history}), encoding="utf-8")
+    atomic_write_text(path, json.dumps({"signatures": history}))
     if signature is None:
         return 0
     streak = 0
@@ -341,5 +342,4 @@ def _record_history(result_dir: Path, signals: list[CompileSignal]) -> int:
 
 def _log(path: Path, entry: dict[str, Any]) -> None:
     entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S"), **entry}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry) + "\n")
+    append_line(path, json.dumps(entry))

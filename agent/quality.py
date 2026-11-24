@@ -82,7 +82,7 @@ def render_final(run_dir: str | Path, best: dict[str, Any] | None) -> list[str]:
     from PIL import Image
 
     from agent.tools.builds import Build, world_meshes
-    from agent.tools.render import HEIGHT, WIDTH, build_front, rasterize, views
+    from agent.tools.render import HEIGHT, WIDTH, build_front, rasterize, save_png, views
     from viewer.loader import load_version
 
     if best is None:
@@ -98,10 +98,10 @@ def render_final(run_dir: str | Path, best: dict[str, Any] | None) -> list[str]:
     for i, view in enumerate(VIEWS):
         forward, right, label = directions[view]
         image = rasterize(meshes, forward, f"{best['version']}  {label}", right)
-        image.save(folder / f"{view}.png")
+        save_png(image, folder / f"{view}.png")
         sheet.paste(image, ((i % 2) * WIDTH, (i // 2) * HEIGHT))
         paths.append(f"renders/final/{view}.png")
-    sheet.save(folder / "views.png")
+    save_png(sheet, folder / "views.png")
     paths.append("renders/final/views.png")
     return paths
 

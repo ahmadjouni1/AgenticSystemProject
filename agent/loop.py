@@ -38,15 +38,15 @@ that passed the checks, else the last build that failed them.
 
 The run folder holds ``workspace/``, ``result/``, ``renders/``, ``llm_calls.jsonl``,
 ``conversation.jsonl`` (every message, tool call and result) and ``record.json``
-(rewritten after every turn).
+(rewritten after every turn). **Resume** (step 11, ``resume``): a stopped run continues from
+its conversation and workspace with a new allowance; the record keeps one entry per session,
+and each finished session adds a line to ``runs/index.jsonl`` (agent/storage.py).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import time
 import traceback
 from collections import Counter
@@ -58,14 +58,16 @@ from pathlib import Path
 from typing import Any
 
 from agent import lessons as lessons_file
+from agent import storage
 from agent.context import ContextPolicy, checkpoint_text
 from agent.tools import BY_NAME, ToolContext, ToolOutput, run_tool, schemas
 from compiler import compile as compile_run
 from compiler import workspace_digest
 from compiler.feedback import failure_signature
+from fileio import append_line, atomic_copy, atomic_write_json
 from llm import (Budget, BudgetExceeded, CallLog, CallTimeLimit, LLMError, Message, System,
                  ToolResult, Usage, User)
-from llm.messages import to_chat, tools_to_chat
+from llm.messages import to_chat, to_dict, tools_to_chat
 from llm.protocol import UNKNOWN, Model, Reply
 
 REPLICA_ROOT = Path(__file__).resolve().parents[1]
@@ -181,22 +183,6 @@ def describe_best(best: dict[str, Any] | None) -> str:
     return "best build: result/last_failed (built, but failed its checks)"
 
 
-def _message_dict(message: Message) -> dict[str, Any]:
-    if isinstance(message, System):
-        return {"role": "system", "content": message.content}
-    if isinstance(message, User):
-        out: dict[str, Any] = {"role": "user", "content": message.content}
-        if message.images:
-            out["images"] = list(message.images)
-        return out
-    if isinstance(message, ToolResult):
-        return {"role": "tool", "call_id": message.call_id, "name": message.name,
-                "content": message.content, "is_error": message.is_error}
-    return {"role": "assistant", "content": message.content, "reasoning": message.reasoning,
-            "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments_json()}
-                           for c in message.tool_calls]}
-
-
 class _Files:
     def __init__(self, run_dir: Path):
         self.conversation = run_dir / "conversation.jsonl"
@@ -204,14 +190,11 @@ class _Files:
 
     def log(self, turn: int, message: Message, **extra: Any) -> None:
         entry = {"turn": turn, "time": datetime.now(UTC).isoformat(timespec="milliseconds"),
-                 **_message_dict(message), **extra}
-        with self.conversation.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                 **to_dict(message), **extra}
+        append_line(self.conversation, json.dumps(entry, ensure_ascii=False))
 
     def save(self, record: dict[str, Any]) -> None:
-        temporary = self.record.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, self.record)
+        atomic_write_json(self.record, record, indent=2, ensure_ascii=False)
 
 
 # ---- reminders --------------------------------------------------------------------------------
@@ -257,6 +240,20 @@ def detail_phase(version: str) -> str:
         "message.\n</phase_2>")
 
 
+def resumed_message(status: str, reason: str, allowance: dict[str, Any]) -> str:
+    what = reason.splitlines()[0][:200] if reason else ""
+    parts = []
+    if allowance.get("max_time_s"):
+        parts.append(f"{allowance['max_time_s'] / 60:.0f} min")
+    if allowance.get("max_cost_usd") is not None:
+        parts.append(f"${allowance['max_cost_usd']:.2f}")
+    parts.append(f"{allowance['max_turns']} turns")
+    return (f"<resumed>\nThis run stopped ({status}{': ' + what if what else ''}) and now "
+            f"continues with a new allowance ({', '.join(parts)}). The workspace is as it was "
+            "left. Compile first to see where the build stands, then go on and finish as "
+            "usual.\n</resumed>")
+
+
 FINAL_RESPONSE_REQUIRED = (
     "<final_response_required>\nThe latest compile passed and nothing changed since. Reply "
     "with a short final message (bodies, joints and their ranges) and no tool calls.\n"
@@ -271,7 +268,8 @@ class _Run:
                  compiler: Callable, on_event: Callable[[Event], None] | None,
                  context: ContextPolicy | None, effort: EffortPolicy | None,
                  max_time_s: float | None, lessons: bool, prompt_set: PromptSet,
-                 fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False):
+                 fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False,
+                 saved: storage.Saved | None = None, index: Path | None = None):
         self.prompt, self.model, self.budget, self.max_turns = prompt, model, budget, max_turns
         self.context, self.effort, self.max_time_s, self.lessons = (context, effort, max_time_s,
                                                                     lessons)
@@ -307,6 +305,77 @@ class _Run:
         self.same_failures = 0
         self.last_signature: str | None = None
         self.final_text: str | None = None
+        # sessions (step 11): a resumed run continues the counters of the earlier ones
+        self.index = index
+        self.saved = saved
+        self.first_turn = 0  # the last turn before this session
+        self.prior_cost = 0.0
+        self.prior_duration = 0.0
+        self.first_started = self.started
+        self.sessions: list[dict[str, Any]] = []
+        self.resumed_from: str | None = None
+        if saved is not None:
+            self.restore(saved)
+
+    def restore(self, saved: storage.Saved) -> None:
+        """Continue from a stopped run: its messages, counters and earlier sessions. The
+        latest compile is not restored: the model compiles again (cached if unchanged)."""
+        record = saved.record
+        self.messages, self.turn_of = list(saved.messages), list(saved.turn_of)
+        # the record also counts a turn whose call was refused (budget): no message has it
+        self.turn = self.first_turn = max([*self.turn_of, int(record.get("turns") or 0)])
+        self.per_turn = list(record.get("per_turn") or [])
+        tokens = record.get("tokens") or {}
+        self.usage = Usage(**{k: tokens.get(k, 0) for k in Usage.__dataclass_fields__})
+        self.cost = self.prior_cost = float(record.get("cost_usd") or 0.0)
+        self.prior_duration = float(record.get("duration_s") or 0.0)
+        self.unknown_cost_calls = int(record.get("unknown_cost_calls") or 0)
+        compiles = record.get("compiles") or {}
+        self.compiles = {k: int(compiles.get(k, 0)) for k in self.compiles}
+        self.tool_counts = Counter(record.get("tool_calls") or {})
+        self.doc_reads = Counter(record.get("doc_reads") or {})
+        self.effort_turns = Counter(record.get("effort_turns") or {})
+        two = record.get("two_phase")
+        if self.two_phase and isinstance(two, dict):
+            self.phase, self.skeleton = two.get("phase", 1), two.get("skeleton")
+            self.detail_compiles = int(two.get("detail_compiles", 0))
+        try:
+            self.first_started = datetime.fromisoformat(record["started"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            pass
+        status = storage.status_of(saved.run_dir, record)
+        self.resumed_from = status
+        sessions = [dict(s) for s in record.get("sessions") or []]
+        if not sessions:  # a record from before step 11: one session
+            sessions = [{"session": 1, "started": record.get("started"),
+                         "turns": [1, record.get("turns")],
+                         "cost_usd": record.get("cost_usd"),
+                         "duration_s": record.get("duration_s")}]
+        sessions[-1].update({"status": status, "ended": record.get("updated"),
+                             "reason": (record.get("reason") or "").split("\n")[0][:300]})
+        self.sessions = sessions
+        if self.context is not None:
+            policy = record.get("context_policy") or {}
+            self.context.hits.update(policy.get("hits") or {})
+            self.context.summaries.extend(policy.get("summaries") or [])
+            self.replay_doc_reads()
+
+    def replay_doc_reads(self) -> None:
+        """Rule c after a resume: the docs pages read in full, with the turn of the read."""
+        calls: dict[str, str] = {}
+        for message, turn in zip(self.messages, self.turn_of, strict=True):
+            if hasattr(message, "tool_calls"):
+                calls.update({c.id: c.arguments.get("path") for c in message.tool_calls
+                              if c.name == "read" and isinstance(c.arguments.get("path"), str)})
+            elif isinstance(message, ToolResult) and message.call_id in calls \
+                    and not message.is_error:
+                try:
+                    data = json.loads(message.content)
+                except json.JSONDecodeError:
+                    continue
+                path = calls[message.call_id].replace("\\", "/").removeprefix("./")
+                if isinstance(data, dict) and "text" in data and path.startswith("docs/"):
+                    self.context.record_read(path, turn)
 
     # -- bookkeeping --
 
@@ -334,9 +403,10 @@ class _Run:
             "model": {"provider": getattr(self.model, "provider", "?"),
                       "model": getattr(self.model, "model", "?"),
                       "role": getattr(self.model, "role", None)},
-            "started": datetime.fromtimestamp(self.started, UTC).isoformat(timespec="seconds"),
+            "started": datetime.fromtimestamp(self.first_started, UTC).isoformat(
+                timespec="seconds"),
             "updated": datetime.now(UTC).isoformat(timespec="seconds"),
-            "duration_s": round(time.time() - self.started, 2),
+            "duration_s": round(self.prior_duration + time.time() - self.started, 2),
             "turns": self.turn, "max_turns": self.max_turns,
             "compiles": {**self.compiles,
                          "last_status": last.status if last else None,
@@ -364,6 +434,8 @@ class _Run:
                 "detail_compiles": self.detail_compiles},
             "lessons": self.lessons,
             "prompt_set": self.prompt_set.name,
+            "options": self.options(),
+            "sessions": self.sessions + [self.session_entry(status, reason)],
             **self.planning_metrics(),
             "doc_reads": dict(self.doc_reads),
             "reminders": dict(Counter(t["reminder"] for t in self.per_turn
@@ -374,6 +446,29 @@ class _Run:
         }
         self.files.save(record)
         return record
+
+    def options(self) -> dict[str, Any]:
+        """How the run was set up: ``resume`` sets the next session up the same way."""
+        return {"role": getattr(self.model, "role", None),
+                "context": "none" if self.context is None else "v1",
+                "effort": None if self.effort is None else asdict(self.effort),
+                "prompt_set": self.prompt_set.name, "two_phase": self.two_phase,
+                "lessons": self.lessons, "fix_reserve_s": self.fix_reserve_s}
+
+    def session_entry(self, status: str, reason: str) -> dict[str, Any]:
+        now = time.time()
+        return {"session": len(self.sessions) + 1,
+                "started": datetime.fromtimestamp(self.started, UTC).isoformat(
+                    timespec="seconds"),
+                "ended": datetime.fromtimestamp(now, UTC).isoformat(timespec="seconds"),
+                "status": status, "reason": reason.split("\n")[0][:300],
+                "resumed_from": self.resumed_from,
+                "turns": [self.first_turn + 1, self.turn],
+                "cost_usd": round(self.cost - self.prior_cost, 6),
+                "duration_s": round(now - self.started, 2),
+                "allowance": {"max_time_s": self.max_time_s, "max_turns": self.max_turns,
+                              "max_cost_usd": self.budget.max_cost_usd,
+                              "max_calls": self.budget.max_calls}}
 
     def planning_metrics(self) -> dict[str, Any]:
         """Tokens spent up to and including the turn that first calls compile (all of the
@@ -609,6 +704,22 @@ class _Run:
     # -- one run --
 
     def run(self) -> RunResult:
+        storage.acquire_lock(self.run_dir)
+        try:
+            return self._run()
+        finally:
+            storage.release_lock(self.run_dir)
+
+    def start(self) -> None:
+        """The first messages: the prompts and task, or (resumed) the resume note."""
+        if self.saved is not None:
+            if self.saved.repaired:  # results for the calls the stop left open
+                storage.append_conversation(self.run_dir, self.saved.repaired)
+            previous = self.sessions[-1]
+            allowance = self.session_entry("running", "")["allowance"]
+            self.add(User(resumed_message(previous["status"], previous.get("reason", ""),
+                                          allowance)), reminder="resumed")
+            return
         system = self.prompt_set.system.read_text(encoding="utf-8")
         if self.lessons:
             system += lessons_file.prompt_section()
@@ -616,6 +727,9 @@ class _Run:
         self.add(System(self.prompt_set.quickstart.read_text(encoding="utf-8")))
         task = SKELETON_TASK if self.two_phase else self.prompt_set.task
         self.add(User(task.format(prompt=self.prompt)))
+
+    def _run(self) -> RunResult:
+        self.start()
         status, reason = "max_turns", f"stopped after {self.max_turns} turns"
         try:
             status, reason = self.loop()
@@ -632,13 +746,18 @@ class _Run:
             lessons_file.learn(self.run_dir)
         self.finish_quality()
         record = self.record(status, reason)
+        if self.index is not None:
+            try:
+                storage.append_index(record, self.index)
+            except OSError as exc:  # the index is for reports; keep the run's outcome
+                record["index_error"] = str(exc)
         self.on_event({"kind": "end", "status": status, "reason": reason,
                        "run_dir": self.run_dir, "record": record})
         return RunResult(status, reason, self.run_dir, self.turn, self.final_text,
                          record["best"], record)
 
     def loop(self) -> tuple[str, str]:
-        while self.turn < self.max_turns:
+        while self.turn - self.first_turn < self.max_turns:
             stop = self.time_check()
             if stop is not None:
                 return stop
@@ -781,7 +900,8 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         context: ContextPolicy | None = None, effort: EffortPolicy | None = None,
         max_time_s: float | None = MAX_TIME_S, lessons: bool = False,
         prompt_set: str | PromptSet = DEFAULT_PROMPT_SET,
-        fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False) -> RunResult:
+        fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False,
+        index: str | Path | None = None) -> RunResult:
     """Run the agent on ``prompt`` until it finishes with a checked build, or stops.
 
     ``context``: the context policy (agent/context.py), or None to send the full history.
@@ -790,7 +910,8 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
     ``lessons``: use and update runs/lessons.md (off by default). ``prompt_set``: the system
     prompt, quickstart and docs (``PROMPT_SETS``; "v0" is step 9's). ``fix_reserve_s``: no fix
     cycle starts with less time left. ``two_phase``: skeleton first, then detail (an optional
-    high-detail mode; off by default)."""
+    high-detail mode; off by default). ``index``: the run index the finished run is added to
+    (default: ``runs/index.jsonl`` for a run under ``runs_root``, else next to the run)."""
     if isinstance(prompt_set, str):
         prompt_set = PROMPT_SETS[prompt_set]
     run_dir = Path(run_dir).resolve() if run_dir is not None else new_run_dir(prompt, runs_root)
@@ -798,18 +919,59 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
     main = run_dir / "workspace" / "main.py"
     if not main.exists():
-        shutil.copyfile(TEMPLATE, main)
-    # One budget and one call log for the run.
+        atomic_copy(TEMPLATE, main)
+    _wire(model, budget, run_dir)
+    index = Path(index) if index is not None else storage.default_index(run_dir, runs_root)
+    return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
+                max_time_s, lessons, prompt_set, fix_reserve_s, two_phase, index=index).run()
+
+
+def _wire(model: Model, budget: Budget, run_dir: Path) -> None:
+    """One budget and one call log for the run."""
     if getattr(model, "budget", None) is None and hasattr(model, "budget"):
         model.budget = budget
     if getattr(model, "log", None) is None and hasattr(model, "log"):
         model.log = CallLog(run_dir)
     if getattr(model, "budget", budget) is not budget:
         raise ValueError("the model has a different Budget than the one given to run()")
-    return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
-                max_time_s, lessons, prompt_set, fix_reserve_s, two_phase).run()
 
 
-__all__ = ["DEFAULT_PROMPT_SET", "FINAL_TURN_S", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS",
-           "EffortPolicy",
-           "PromptSet", "RunResult", "best_build", "new_run_dir", "run"]
+def saved_options(record: dict[str, Any]) -> dict[str, Any]:
+    """How a stopped run was set up (``record["options"]``; inferred for older records)."""
+    options = dict(record.get("options") or {})
+    options.setdefault("role", (record.get("model") or {}).get("role") or "builder")
+    options.setdefault("context", "v1" if record.get("context_policy") else "none")
+    options.setdefault("effort", asdict(EffortPolicy()))
+    options.setdefault("prompt_set", record.get("prompt_set") or DEFAULT_PROMPT_SET)
+    options.setdefault("two_phase", bool(record.get("two_phase")))
+    options.setdefault("lessons", bool(record.get("lessons")))
+    options.setdefault("fix_reserve_s", record.get("fix_reserve_s", FIX_RESERVE_S))
+    return options
+
+
+def resume(run_dir: str | Path, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *,
+           compiler: Callable = compile_run, on_event: Callable[[Event], None] | None = None,
+           context: ContextPolicy | None = None, effort: EffortPolicy | None = None,
+           max_time_s: float | None = MAX_TIME_S, runs_root: str | Path = RUNS_ROOT,
+           index: str | Path | None = None) -> RunResult:
+    """Continue a stopped run (``time_exceeded``, ``budget_exceeded``, a crash, ...) from its
+    conversation.jsonl and workspace. ``budget``, ``max_turns`` and ``max_time_s`` are this
+    session's new allowance; the prompt set, two-phase, lessons and fix reserve come from the
+    record (``saved_options``); ``context`` and ``effort`` are the caller's (the CLI builds
+    them from the saved options). Raises ``storage.ResumeError`` if the run succeeded or is
+    still running."""
+    saved = storage.load(run_dir)
+    storage.check_resumable(saved)
+    storage.clean_after_crash(saved.run_dir)
+    options = saved_options(saved.record)
+    _wire(model, budget, saved.run_dir)
+    index = Path(index) if index is not None else storage.default_index(saved.run_dir, runs_root)
+    return _Run(saved.record["prompt"], model, budget, max_turns, saved.run_dir, compiler,
+                on_event, context, effort, max_time_s, bool(options["lessons"]),
+                PROMPT_SETS[options["prompt_set"]], float(options["fix_reserve_s"]),
+                bool(options["two_phase"]), saved=saved, index=index).run()
+
+
+__all__ = ["DEFAULT_PROMPT_SET", "FINAL_TURN_S", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS",
+           "PROMPT_SETS", "EffortPolicy", "PromptSet", "RunResult", "best_build", "new_run_dir",
+           "resume", "run", "saved_options"]

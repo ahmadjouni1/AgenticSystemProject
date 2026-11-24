@@ -23,7 +23,8 @@ Rules (``validate``):
   before the next user or assistant message;
 - a ``ToolResult`` answers a call that is still open.
 
-Conversion to and from the Chat Completions format (OpenAI and DeepSeek):
+Storage: ``to_dict`` / ``from_dict`` (one conversation.jsonl line per message; a resumed run
+reads them back). Conversion to and from the Chat Completions format (OpenAI and DeepSeek):
 ``to_chat`` / ``from_chat`` for messages, ``tools_to_chat`` / ``tools_from_chat`` for tools.
 """
 
@@ -141,6 +142,50 @@ def validate(messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = ())
                 open_calls[call.id] = call.name
     if not any(not isinstance(m, System) for m in messages):
         raise MessageError("a conversation needs a user message after the system prompt")
+
+
+# ---- storage (conversation.jsonl) ------------------------------------------------------------
+
+
+def to_dict(message: Message) -> dict[str, Any]:
+    """One message as JSON-ready data: what conversation.jsonl stores per line.
+
+    A tool call keeps the exact argument string the model sent (``arguments``), so a resumed
+    conversation sends the same bytes and the provider's prompt cache still matches."""
+    if isinstance(message, System):
+        return {"role": "system", "content": message.content}
+    if isinstance(message, User):
+        out: dict[str, Any] = {"role": "user", "content": message.content}
+        if message.images:
+            out["images"] = list(message.images)
+        return out
+    if isinstance(message, ToolResult):
+        return {"role": "tool", "call_id": message.call_id, "name": message.name,
+                "content": message.content, "is_error": message.is_error}
+    if isinstance(message, Assistant):
+        return {"role": "assistant", "content": message.content, "reasoning": message.reasoning,
+                "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments_json()}
+                               for c in message.tool_calls]}
+    raise MessageError(f"not a neutral message: {type(message).__name__}")
+
+
+def from_dict(data: dict[str, Any]) -> Message:
+    """The inverse of ``to_dict``. Other keys (conversation.jsonl adds ``turn``, ``time``,
+    ``reminder``, ...) are ignored. A call's arguments are parsed again, so a call whose JSON
+    was broken comes back with the same ``error``."""
+    role = data.get("role")
+    if role == "system":
+        return System(data["content"])
+    if role == "user":
+        return User(data["content"], tuple(data.get("images") or ()))
+    if role == "tool":
+        return ToolResult(data["call_id"], data.get("name", ""), data["content"],
+                          bool(data.get("is_error", False)))
+    if role == "assistant":
+        calls = tuple(ToolCall.parse(c["id"], c["name"], c.get("arguments"))
+                      for c in data.get("tool_calls") or [])
+        return Assistant(data.get("content") or "", calls, data.get("reasoning"))
+    raise MessageError(f"unknown message role {role!r}")
 
 
 # ---- Chat Completions format ------------------------------------------------------------------

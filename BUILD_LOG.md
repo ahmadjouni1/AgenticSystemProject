@@ -2600,3 +2600,97 @@ measured, since that needs an API call):
     tool time per run), so a run can still end late in the worst case.
   - The cap does not tell the model that its output is short. It gets the `<reply_cut_off>`
     note as before.
+
+## Step 11: Run storage
+
+No live runs needed; everything is tested with ScriptedModel. Step 12 has not been started.
+
+### What was built
+
+| # | What | Files |
+| --- | --- | --- |
+| 1 | **Messages to and from dicts:** `llm.messages.to_dict` / `from_dict`, the format of a `conversation.jsonl` line (the loop's own `_message_dict` is gone). A tool call keeps the exact argument string the model sent, and a call whose JSON was broken comes back with the same parse error. A resumed conversation therefore sends the same bytes, and the provider's prompt cache still matches | `llm/messages.py` |
+| 2 | **Resume:** `python -m agent --resume <run_dir>` (or `agent.loop.resume`). See below | `agent/storage.py`, `agent/loop.py`, `agent/__main__.py` |
+| 3 | **`--list <runs>`**, one row per run (run, status, turns, cost, best version, sessions, prompt) and a total, with `crashed` for a run whose process died. **`runs/index.jsonl`:** one line per finished session (run path, prompt, status, reason, session, turns, cost, duration, best version, model, prompt set, two-phase, quality). Any run under `runs/`, experiment subfolders included, goes to `runs/index.jsonl`; a run elsewhere goes to the folder above it. Every version folder already holds its `main.py` (since step 2) | `agent/storage.py`, `agent/loop.py` |
+| 4 | **Atomic writes** (`fileio.py`) wherever a crash could leave half a file. Whole files: temporary file + fsync + `os.replace`, retried while Windows has the target open. Covers `record.json`, the workspace files from write and edit, the starter `main.py`, the compile cache and failure history, `runs/lessons.md`, and render PNGs. Logs: one `write` per line, flushed and fsynced (`conversation.jsonl`, `llm_calls.jsonl`, `compile_log.jsonl`, `index.jsonl`); readers skip a last line cut short. Exports were already atomic (staging folder + rename) | `fileio.py`, `agent/`, `compiler/runner.py`, `llm/accounting.py` |
+
+**How resume works:**
+- **The allowance:** `--max-time`, `--max-cost`, `--max-calls` and `--max-turns` are the new
+  session's. The role, prompt set, context policy, effort, two-phase, lessons and fix
+  reserve come from `record["options"]`, which is new; they are inferred for older records.
+- **What is refused:** a run that succeeded, or one whose `.lock` names a live other process
+  (the loop writes the lock at the start and removes it at the end). Windows is asked
+  through `OpenProcess`, since `os.kill(pid, 0)` there would terminate the process.
+- **Clean-up first:** `clean_after_crash` deletes temporary files and export staging folders.
+  A last `conversation.jsonl` line cut short is dropped from the file, so appending can go
+  on.
+- **Repair:** tool calls at the end with no result get one: `interrupted` ("may or may not
+  have taken effect; read or compile") or `not_run` (the run stopped before running them).
+  The repair is logged too, so the log stays valid for the next resume.
+- **The conversation goes on:** the old messages unchanged, then a `<resumed>` note (why it
+  stopped, the new allowance, "compile first"). The latest compile is not restored; the
+  model compiles again, and the compile cache answers if nothing changed.
+- **Counters continue:** turns (numbering goes on), tokens, cost, compiles, tool calls, doc
+  reads, the two-phase state, and the context policy's counts and read pages.
+  `duration_s` is the total over sessions. `record["sessions"]` has one entry per session:
+  started, ended, status, reason, resumed from, turns, cost, duration, allowance.
+
+**Example (`--list runs/step10b`, the 24 step 10b runs):** 24 rows, then
+`24 runs: 19 success, 5 time_exceeded; $3.1188 spent`.
+
+### Tests (13 new, no network, `tests/test_storage.py`; 1 existing test updated)
+
+- **Messages:** every kind round-trips (exact argument bytes, broken JSON, images,
+  reasoning); log keys are ignored; an unknown role is refused.
+- **Writes:**
+  - a failed atomic write keeps the old file and leaves no temp;
+  - a locked target is retried;
+  - a cut-off last JSONL line is skipped, damage in the middle is not;
+  - a whole run leaves no `.tmp` and no lock.
+- **Resume:**
+  - after `time_exceeded`, it continues and succeeds. The same message prefix is sent, then
+    the note; turns and compiles continue; there are 2 sessions and 2 index lines;
+  - after a crash mid-turn (the compiler dies, plus a cut-off log line and a stale temp
+    file): the compile call is answered `interrupted`, the first session is `crashed`, and
+    the log is valid afterwards;
+  - after `budget_exceeded`: a fresh budget;
+  - calls a stopped run never ran are answered `not_run`;
+  - a successful run and a run held by a live process are refused.
+- **Index and list:** one index for the runs folder, the right rows (a crash shows as
+  `crashed`), the `--list` output and its totals.
+- **CLI:** a run stopped by its call cap is resumed with `--resume`. The sessions, turn
+  numbering and saved options are checked, and a second resume is refused.
+- **Updated:** the CLI test now finds `index.jsonl` beside the run folder.
+
+### How Articraft does it (study §11)
+
+- **Runs:** `runs/<timestamp>-<slug>[-2]/` holds `record.json`, `conversation.jsonl`,
+  `workspace/` and `result/`. The record is rewritten after every model call and compile.
+- **Versions:** the next USDZ index. There is no `main.py` snapshot.
+- **Resume:** there is none. `replay` only redraws the log in the TUI.
+- **Writes:** not atomic.
+- **The study's ideas, all done here:** resume from `conversation.jsonl` (it "already holds
+  everything a resume command would need"), atomic writes, and a `main.py` snapshot per
+  version (ours since step 2).
+
+### What we changed vs Articraft, and why
+
+- **Resume.** A long run stopped by time, budget, sleep or a crash no longer has to start
+  again. In step 10b, the 5 failed pump runs spent 24-31 minutes each; with resume they can
+  go on.
+- **Sessions in one record.** Reports can count a run once and still see what each session
+  cost.
+- **An index file.** Step 12 reads `runs/index.jsonl` instead of walking every run folder.
+  `--list` walks the folders, so it also finds crashed runs and runs made before the index
+  existed.
+
+### Open ideas
+
+- **The latest compile is not restored on resume,** so the model spends one turn compiling.
+  It could be restored from the compile cache.
+- **The compaction summary is not restored** (only the counters are). A long resumed run
+  may compact again, at the cost of one cheap-model call.
+- **A lock can outlive a crash under another process's id,** if Windows reuses the id. Then
+  resume refuses until the lock file is deleted by hand.
+- **`--list` could filter** by status or prompt, and a script could backfill
+  `runs/index.jsonl` from older runs.

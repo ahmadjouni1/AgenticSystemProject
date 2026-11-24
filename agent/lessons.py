@@ -13,6 +13,8 @@ import json
 import re
 from pathlib import Path
 
+from fileio import atomic_write_text, read_jsonl
+
 LESSONS_FILE = Path(__file__).resolve().parents[1] / "runs" / "lessons.md"
 MAX_LESSONS = 15
 HEADER = "# SDK pitfalls from earlier runs\n\n"
@@ -46,8 +48,7 @@ def lessons_from_run(run_dir: Path) -> list[str]:
     conversation = run_dir / "conversation.jsonl"
     if not conversation.is_file():
         return found
-    for line in conversation.read_text(encoding="utf-8").splitlines():
-        entry = json.loads(line)
+    for entry in read_jsonl(conversation):
         content = entry.get("content") or ""
         if "Primary issue:" not in content:
             continue
@@ -73,6 +74,5 @@ def learn(run_dir: Path, path: Path = LESSONS_FILE) -> list[str]:
     new = [lesson for lesson in lessons_from_run(run_dir) if lesson not in old]
     if new:
         kept = (old + new)[-MAX_LESSONS:]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(HEADER + "".join(f"- {lesson}\n" for lesson in kept), encoding="utf-8")
+        atomic_write_text(path, HEADER + "".join(f"- {lesson}\n" for lesson in kept))
     return new

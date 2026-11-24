@@ -16,9 +16,19 @@ the latest compile passed every blocking check, and the workspace has not change
 that compile (its digest equals the compile's). Otherwise a short ``<compile_required>``
 or ``<final_response_required>`` reminder is added and the loop goes on.
 
+**Time limit** (25 min by default, step 10b). When it runs out and the latest compile passed
+with no edit after it, the model gets one final turn for its summary and the run ends as a
+success; otherwise ``time_exceeded``. A fix cycle (the turn after a failed compile) does not
+start with less than ``fix_reserve_s`` (2 min) left.
+
+**Two-phase build** (``two_phase=True``, step 10b). Phase 1 asks for a skeleton (plain
+primitives at real sizes, the real joints); its first passing compile (every check, the
+motion checks included) starts phase 2, which asks for the detail. The skeleton's version
+stays the best build unless a phase 2 compile passes.
+
 **End states:** ``success``, ``failed_checks`` (the model keeps finishing while its latest
-compile fails its checks), ``budget_exceeded``, ``time_exceeded`` (wall clock, 15 min by
-default), ``max_turns``, ``no_progress`` (3 empty
+compile fails its checks), ``budget_exceeded``, ``time_exceeded`` (wall clock),
+``max_turns``, ``no_progress`` (3 empty
 replies in a row, 5 identical compile failures in a row, or 3 refused finishes without a
 failing build to blame), ``error``. Every run keeps its best build: the latest version
 that passed the checks, else the last build that failed them.
@@ -89,7 +99,8 @@ TEMPLATE = REPLICA_ROOT / "prompts" / "main_template.py"
 RUNS_ROOT = REPLICA_ROOT / "runs"
 
 MAX_TURNS = 60
-MAX_TIME_S = 15 * 60  # wall clock per run
+MAX_TIME_S = 25 * 60  # wall clock per run (step 10b; 15 min before)
+FIX_RESERVE_S = 120  # no fix cycle starts with less time left (median fix cycle: 1.3 min)
 MAX_EMPTY_REPLIES = 3
 MAX_SAME_FAILURES = 5
 MAX_REFUSED_FINISHES = 3
@@ -211,6 +222,33 @@ REPLY_CUT_OFF = (
     "after compiling.\n</reply_cut_off>")
 
 
+TIME_UP_FINAL = (
+    "<time_up>\nThe time for this run is up. The latest compile passed and nothing changed "
+    "since, so that build is the result. Do not call any tool: reply now with a short final "
+    "message (bodies, joints and their ranges).\n</time_up>")
+
+SKELETON_TASK = (
+    "Build this object: {prompt}\n\nThis is a two-phase build.\n\nPhase 1 (now): write a "
+    "skeleton main.py. Every real body as plain primitives (Box, Cylinder, Sphere) at real "
+    "sizes, and every real joint with its real type, pivot, axis and limits. No details yet: no "
+    "handles, knobs, rounded edges or shape helpers. Write a short plan (at most about 10 lines) "
+    "in your reply, then call write with the whole main.py in the same reply, then compile. "
+    "Phase 1 ends when the skeleton passes every check, the motion checks included (floating, "
+    "separation, swept collision, loop closure); then you get the phase 2 instructions.")
+
+
+def detail_phase(version: str) -> str:
+    return (
+        f"<phase_2>\nThe skeleton passed every check; it is kept as the fallback build "
+        f"({version}). Phase 2: add the detail that makes the object realistic and recognizable "
+        "(rule 1 of \"What a good object is\"): shaped parts with the shape helpers, handles, "
+        "knobs, rims, feet, rounded edges, real wall and panel thickness. Keep the skeleton's "
+        "bodies, joints, pivots, axes and limits unless a detail needs a change. Add the details "
+        "in a few groups with edit, and compile after each group, so a failure is in the newest "
+        "detail. Finish as usual: a passing compile, the joints probed, a short final "
+        "message.\n</phase_2>")
+
+
 FINAL_RESPONSE_REQUIRED = (
     "<final_response_required>\nThe latest compile passed and nothing changed since. Reply "
     "with a short final message (bodies, joints and their ranges) and no tool calls.\n"
@@ -224,11 +262,18 @@ class _Run:
     def __init__(self, prompt: str, model: Model, budget: Budget, max_turns: int, run_dir: Path,
                  compiler: Callable, on_event: Callable[[Event], None] | None,
                  context: ContextPolicy | None, effort: EffortPolicy | None,
-                 max_time_s: float | None, lessons: bool, prompt_set: PromptSet):
+                 max_time_s: float | None, lessons: bool, prompt_set: PromptSet,
+                 fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False):
         self.prompt, self.model, self.budget, self.max_turns = prompt, model, budget, max_turns
         self.context, self.effort, self.max_time_s, self.lessons = (context, effort, max_time_s,
                                                                     lessons)
         self.prompt_set = prompt_set
+        self.fix_reserve_s = fix_reserve_s
+        self.two_phase = two_phase
+        self.phase = 1 if two_phase else None
+        self.skeleton: dict[str, Any] | None = None  # the passing skeleton (two-phase)
+        self.detail_compiles = 0  # compiles in phase 2
+        self.time_limit: dict[str, Any] | None = None  # how the time limit ended the run
         self.effort_turns: Counter[str] = Counter()
         self.doc_reads: Counter[str] = Counter()
         self.quality: dict[str, Any] | None = None
@@ -304,6 +349,11 @@ class _Run:
                 "summaries": self.context.summaries},
             "effort_turns": dict(self.effort_turns),
             "max_time_s": self.max_time_s,
+            "fix_reserve_s": self.fix_reserve_s,
+            "time_limit": self.time_limit,
+            "two_phase": None if not self.two_phase else {
+                "phase": self.phase, "skeleton": self.skeleton,
+                "detail_compiles": self.detail_compiles},
             "lessons": self.lessons,
             "prompt_set": self.prompt_set.name,
             **self.planning_metrics(),
@@ -424,9 +474,92 @@ class _Run:
             signature = failure_signature(result.signals) or result.signals_text
             self.same_failures = self.same_failures + 1 if signature == self.last_signature else 1
             self.last_signature = signature
+        if self.phase == 2:
+            self.detail_compiles += 1
         primary = next((s.kind for s in result.signals if s.severity == "failure"), None)
         return {"status": result.status, "cached": result.cached, "primary": primary,
                 "version": result.version}
+
+    def skeleton_done(self) -> str | None:
+        """Two-phase: the phase 2 message, once phase 1 has a passing, fresh compile."""
+        if self.phase != 1 or self.finish_blocker() is not None:
+            return None
+        last = self.ctx.last_compile
+        version = f"v{last.version:04d}" if last.version is not None else "the latest build"
+        self.phase = 2
+        self.skeleton = {"version": version, "turn": self.turn,
+                         "minutes": round((time.time() - self.started) / 60, 2)}
+        return detail_phase(version)
+
+    def routine(self) -> bool:
+        """A routine turn: the latest compile passed (verifying, probing, finishing). Not the
+        turns that write phase 2's detail before its first compile."""
+        last = self.ctx.last_compile
+        if last is None or not last.ok:
+            return False
+        return not (self.phase == 2 and self.detail_compiles == 0)
+
+    def fix_cycle_starts(self) -> bool:
+        """The previous turn ended with a failed compile: the next turn starts a fix."""
+        if not self.per_turn:
+            return False
+        compiled = self.per_turn[-1].get("compile")
+        return bool(compiled) and compiled["status"] != "success"
+
+    def time_check(self) -> tuple[str, str] | None:
+        """The end of the run if the clock says so; None to go on."""
+        if self.max_time_s is None:
+            return None
+        elapsed = time.time() - self.started
+        if elapsed > self.max_time_s:
+            if self.finish_blocker() is None:
+                return self.final_turn(elapsed)
+            self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "stopped"}
+            return "time_exceeded", (f"stopped after {elapsed:.0f} s (the limit is "
+                                     f"{self.max_time_s:.0f} s)")
+        left = self.max_time_s - elapsed
+        if self.fix_reserve_s and left < self.fix_reserve_s and self.fix_cycle_starts():
+            self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "no_fix_cycle"}
+            return "time_exceeded", (f"stopped after {elapsed:.0f} s: {left:.0f} s left, less "
+                                     f"than a fix cycle needs ({self.fix_reserve_s:.0f} s; the "
+                                     f"limit is {self.max_time_s:.0f} s)")
+        return None
+
+    def final_turn(self, elapsed: float) -> tuple[str, str]:
+        """Time is up with a passing, fresh compile: one last call for the summary. Tool calls
+        in it are not run; the passing build is the result either way."""
+        self.turn += 1
+        self.add(User(TIME_UP_FINAL), reminder="time_up")
+        sent = self.messages
+        if self.context is not None:
+            sent = self.context.view(self.messages, self.turn_of, self.turn,
+                                     extra_chars=self.tools_chars)
+        metrics: dict[str, Any] = {"turn": self.turn, "reminder": "time_up",
+                                   "context_tokens_est": self.context_tokens(sent),
+                                   "history_tokens_est": self.context_tokens(),
+                                   "sent_messages": len(sent)}
+        self.per_turn.append(metrics)
+        options: dict[str, Any] = {}
+        if self.effort is not None:
+            options = {"effort": self.effort.routine_effort,
+                       "max_output_tokens": self.effort.routine_max_output_tokens}
+            self.effort_turns["routine"] += 1
+            metrics["effort"] = options["effort"]
+        reply = self.model.query(sent, self.tools, **options)
+        metrics.update(self.account(reply))
+        self.add(reply.message(), finish_reason=reply.finish_reason, not_run=bool(
+            reply.tool_calls))
+        metrics["tools_not_run"] = [c.name for c in reply.tool_calls]
+        text = reply.text.strip()
+        if text:
+            self.final_text = text
+        metrics["finished"] = True
+        self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "final_turn",
+                           "final_text": bool(text)}
+        self.record("running")
+        return "success", (f"time limit reached ({elapsed:.0f} s of {self.max_time_s:.0f} s) "
+                           "with a passing, fresh compile; "
+                           + ("final message given" if text else "no final message"))
 
     # -- one run --
 
@@ -436,7 +569,8 @@ class _Run:
             system += lessons_file.prompt_section()
         self.add(System(system))
         self.add(System(self.prompt_set.quickstart.read_text(encoding="utf-8")))
-        self.add(User(self.prompt_set.task.format(prompt=self.prompt)))
+        task = SKELETON_TASK if self.two_phase else self.prompt_set.task
+        self.add(User(task.format(prompt=self.prompt)))
         status, reason = "max_turns", f"stopped after {self.max_turns} turns"
         try:
             status, reason = self.loop()
@@ -460,10 +594,9 @@ class _Run:
 
     def loop(self) -> tuple[str, str]:
         while self.turn < self.max_turns:
-            elapsed = time.time() - self.started
-            if self.max_time_s is not None and elapsed > self.max_time_s:
-                return "time_exceeded", (f"stopped after {elapsed:.0f} s (the limit is "
-                                         f"{self.max_time_s:.0f} s)")
+            stop = self.time_check()
+            if stop is not None:
+                return stop
             self.turn += 1
             sent = self.messages
             if self.context is not None:
@@ -477,7 +610,7 @@ class _Run:
             options: dict[str, Any] = {}
             last = self.ctx.last_compile
             if self.effort is not None:
-                if last is not None and last.ok:
+                if self.routine():
                     options = {"effort": self.effort.routine_effort,
                                "max_output_tokens": self.effort.routine_max_output_tokens}
                     self.effort_turns["routine"] += 1
@@ -535,6 +668,11 @@ class _Run:
                     self.add(User(checkpoint_text(self.turn, self.ctx.last_compile)),
                              checkpoint=True)
                     self.context.checkpoint()
+                if compile_info is not None:
+                    phase_message = self.skeleton_done()
+                    if phase_message is not None:
+                        self.add(User(phase_message), reminder="phase_2")
+                        metrics["reminder"] = "phase_2"
                 metrics["tools"] = [c.name for c in reply.tool_calls]
                 metrics["compile"] = compile_info
                 event["compile"] = compile_info
@@ -586,14 +724,16 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         on_event: Callable[[Event], None] | None = None,
         context: ContextPolicy | None = None, effort: EffortPolicy | None = None,
         max_time_s: float | None = MAX_TIME_S, lessons: bool = False,
-        prompt_set: str | PromptSet = DEFAULT_PROMPT_SET) -> RunResult:
+        prompt_set: str | PromptSet = DEFAULT_PROMPT_SET,
+        fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False) -> RunResult:
     """Run the agent on ``prompt`` until it finishes with a checked build, or stops.
 
     ``context``: the context policy (agent/context.py), or None to send the full history.
     ``effort``: less reasoning on routine (and optionally planning) turns, or None for the
     model's settings. ``max_time_s``: wall-clock budget (end state ``time_exceeded``).
     ``lessons``: use and update runs/lessons.md (off by default). ``prompt_set``: the system
-    prompt, quickstart and docs (``PROMPT_SETS``; "v0" is step 9's)."""
+    prompt, quickstart and docs (``PROMPT_SETS``; "v0" is step 9's). ``fix_reserve_s``: no fix
+    cycle starts with less time left. ``two_phase``: skeleton first, then detail."""
     if isinstance(prompt_set, str):
         prompt_set = PROMPT_SETS[prompt_set]
     run_dir = Path(run_dir).resolve() if run_dir is not None else new_run_dir(prompt, runs_root)
@@ -610,8 +750,9 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
     if getattr(model, "budget", budget) is not budget:
         raise ValueError("the model has a different Budget than the one given to run()")
     return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
-                max_time_s, lessons, prompt_set).run()
+                max_time_s, lessons, prompt_set, fix_reserve_s, two_phase).run()
 
 
-__all__ = ["DEFAULT_PROMPT_SET", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS", "EffortPolicy",
+__all__ = ["DEFAULT_PROMPT_SET", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS",
+           "EffortPolicy",
            "PromptSet", "RunResult", "best_build", "new_run_dir", "run"]

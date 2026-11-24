@@ -15,8 +15,8 @@ import json
 import sys
 
 from agent.context import ContextConfig, ContextPolicy
-from agent.loop import (DEFAULT_PROMPT_SET, MAX_TIME_S, MAX_TURNS, PROMPT_SETS, RUNS_ROOT,
-                        EffortPolicy, new_run_dir, run)
+from agent.loop import (DEFAULT_PROMPT_SET, FIX_RESERVE_S, MAX_TIME_S, MAX_TURNS, PROMPT_SETS,
+                        RUNS_ROOT, EffortPolicy, new_run_dir, run)
 from llm import Budget, config, get_model, load_env
 
 
@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--planning-effort", choices=["default", "low", "medium", "high"],
                         default="default",
                         help="reasoning effort before the first compile (with --effort adaptive)")
+    parser.add_argument("--fix-reserve", type=float, default=FIX_RESERVE_S,
+                        help="no fix cycle starts with fewer seconds left (0: off)")
+    parser.add_argument("--two-phase", action="store_true",
+                        help="skeleton first (must pass every check), then detail")
     args = parser.parse_args(argv)
     load_env()
     run_dir = new_run_dir(args.prompt, args.runs)
@@ -97,10 +101,12 @@ def main(argv: list[str] | None = None) -> int:
           f"budget ${args.max_cost:.2f} / {args.max_calls} calls / {args.max_time:.0f} s, "
           f"{args.max_turns} turns; context {args.context}, effort {args.effort}, prompt set "
           f"{args.prompt_set}, planning effort {args.planning_effort}"
-          + (", lessons on" if args.lessons else ""), flush=True)
+          + (", lessons on" if args.lessons else "")
+          + (", two-phase" if args.two_phase else ""), flush=True)
     result = run(args.prompt, model, budget, args.max_turns, run_dir=run_dir,
                  on_event=print_event, context=context, effort=effort,
-                 max_time_s=args.max_time, lessons=args.lessons, prompt_set=args.prompt_set)
+                 max_time_s=args.max_time, lessons=args.lessons, prompt_set=args.prompt_set,
+                 fix_reserve_s=args.fix_reserve, two_phase=args.two_phase)
     record = result.record
     print(f"\n{result.status}: {result.reason}")
     print(json.dumps({k: record[k] for k in ("turns", "compiles", "cost_usd", "duration_s")}))

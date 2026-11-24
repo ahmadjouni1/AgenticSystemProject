@@ -1,6 +1,7 @@
 """Step 10 report: variant tables from record.json, and every run's final renders in one folder.
 
     uv run python scripts/step10_report.py            # reads runs/step10/{A,B,C}
+    uv run python scripts/step10_report.py --folder runs/step10b --variants B2 D
 
 Writes ``runs/step10/report.md`` (also printed) and ``runs/step10/renders/``:
 - ``<prompt>__<variant>-<n>.png``: the run's 4 views (front, side, top, iso);
@@ -26,6 +27,10 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 OUT = ROOT / "runs" / "step10"
+KNOWN = {"A": "step 9 prompt + docs", "B": "step 10 prompt + docs",
+         "C": "B + low effort before the first compile",
+         "B2": "B + step 10b fixes (25 min, final turn, contact rule, soft helpers)",
+         "D": "B2 + two-phase build (skeleton, then detail)"}
 VARIANTS = {"A": "step 9 prompt + docs", "B": "step 10 prompt + docs",
             "C": "B + low effort before the first compile"}
 PROMPTS = json.loads((ROOT / "prompts" / "eval_prompts.json").read_text(encoding="utf-8"))["step10"]
@@ -180,8 +185,31 @@ def report(data: dict[str, list[dict]]) -> str:
     parts.append(table(["variant", "prompt", "run", "status", "turns", "compiles ok/fail",
                         "reasoning before 1st compile", "reasoning", "cost", "time", "shapes",
                         "non-box", "helpers"], rows))
+    parts += step10b_rows(data)
     parts += excluded()
     return "\n".join(parts) + "\n"
+
+
+def step10b_rows(data: dict[str, list[dict]]) -> list[str]:
+    """How the time limit ended runs, and the two-phase skeletons (step 10b records only)."""
+    rows = []
+    for v, rs in data.items():
+        if not any("fix_reserve_s" in r for r in rs):
+            continue
+        limits = Counter((r.get("time_limit") or {}).get("outcome", "-") for r in rs)
+        phased = [r["two_phase"] for r in rs if r.get("two_phase")]
+        skeletons = [p["skeleton"] for p in phased if p.get("skeleton")]
+        fallback = sum(1 for r in rs if r.get("two_phase") and r["status"] != "success"
+                       and (r.get("best") or {}).get("passed_checks"))
+        rows.append([v, ", ".join(f"{k} {n}" for k, n in sorted(limits.items())),
+                     f"{len(skeletons)}/{len(phased)}" if phased else "-",
+                     f(median(s["minutes"] for s in skeletons), ".1f") if skeletons else "-",
+                     str(fallback) if phased else "-"])
+    if not rows:
+        return []
+    return ["\n## Time limit and two-phase (step 10b)\n",
+            table(["variant", "time limit outcome (- = not reached)", "skeleton passed",
+                   "skeleton minutes (median)", "failed runs with a passing skeleton"], rows)]
 
 
 def excluded() -> list[str]:
@@ -238,6 +266,16 @@ def renders(data: dict[str, list[dict]]) -> Path:
 
 
 def main() -> None:
+    import argparse
+
+    global OUT, VARIANTS
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--folder", default=str(OUT), help="the experiment folder")
+    parser.add_argument("--variants", nargs="*", default=list(VARIANTS))
+    args = parser.parse_args()
+    OUT = Path(args.folder).resolve()
+    VARIANTS = {v: KNOWN.get(v, v) for v in args.variants}
     data = load()
     text = report(data)
     (OUT / "report.md").write_text(text, encoding="utf-8")

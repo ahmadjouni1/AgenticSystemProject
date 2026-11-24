@@ -12,6 +12,7 @@ import trimesh
 
 from sdk.errors import ValidationError
 from sdk.mesh_geometry import MeshGeometry, from_created
+from sdk.notices import notice
 from sdk.occ import tessellate
 from sdk.transforms import vec3
 
@@ -93,6 +94,9 @@ class TorusGeometry(MeshGeometry):
         super().__init__(*from_created(mesh))
 
 
+RADIUS_CLAMP = 0.45  # a too-large rounded-box radius becomes this times the smallest size
+
+
 class RoundedBoxGeometry(MeshGeometry):
     """A box with every edge filleted (build123d does the fillet, then it is tessellated)."""
 
@@ -109,8 +113,12 @@ class RoundedBoxGeometry(MeshGeometry):
         size = vec3(size, field="rounded box size")
         _positive(*size, what="rounded box size values")
         _positive(radius, what="rounded box radius")
-        if radius >= min(size) / 2:
-            raise ValidationError("rounded box radius must be less than half its smallest size")
+        if radius >= min(size) / 2:  # step 10b: repair it, with a warning, instead of failing
+            clamped = RADIUS_CLAMP * min(size)
+            notice(f"rounded box radius {radius:g} is not less than half its smallest size "
+                   f"{min(size):g}; it was reduced to {clamped:g}",
+                   "Pass a radius below half the smallest size to choose the rounding yourself.")
+            radius = clamped
         box = Box(*size)
         rounded = box.fillet(radius, box.edges())
         super().__init__(*from_created(tessellate(rounded, tolerance, angular_tolerance)))

@@ -78,6 +78,35 @@ class ExtrudeGeometry(MeshGeometry):
         super().__init__(mesh.vertices, mesh.faces)
 
 
+def _inside(point, polygon: np.ndarray) -> bool:
+    """Point in polygon (even-odd ray casting); points on the outline count as outside."""
+    x, y = point
+    inside = False
+    n = len(polygon)
+    for k in range(n):
+        (x1, y1), (x2, y2) = polygon[k], polygon[(k + 1) % n]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _check_holes(outer_face, outer: np.ndarray, holes: list[np.ndarray], face) -> None:
+    """Name the hole that leaves the outline, or the two holes that overlap (step 10b)."""
+    for i, hole in enumerate(holes):
+        inside = (outer_face & face(hole)).area
+        if abs(inside - abs(_area(hole))) > 1e-9:
+            out = next((p for p in hole if not _inside(p, outer)), hole[0])
+            raise ValidationError(
+                f"hole_profiles[{i}] is not inside the outer profile: its point "
+                f"({out[0]:.4g}, {out[1]:.4g}) is on or outside the outline; move or shrink "
+                "the hole so it lies strictly inside")
+    for i in range(len(holes)):
+        for j in range(i + 1, len(holes)):
+            if (face(holes[i]) & face(holes[j])).area > 1e-9:
+                raise ValidationError(f"hole_profiles[{i}] and hole_profiles[{j}] overlap; "
+                                      "holes must lie apart")
+
+
 class ExtrudeWithHolesGeometry(MeshGeometry):
     """Extrude an outer profile with holes cut through it (plates, brackets, panels).
 
@@ -108,6 +137,7 @@ class ExtrudeWithHolesGeometry(MeshGeometry):
             return make_face(Polyline(*[(float(x), float(y)) for x, y in points], close=True))
 
         section = face(outer)
+        _check_holes(section, outer, holes, face)
         for hole in holes:
             section = section - face(hole)
         if abs(section.area - abs(_area(outer)) + sum(abs(_area(h)) for h in holes)) > 1e-9:

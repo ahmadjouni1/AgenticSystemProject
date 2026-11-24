@@ -79,7 +79,8 @@ class Body:
         """Add a named shape, placed at ``xyz`` (m) and ``rpy`` (rad) in this body."""
         check_name(name, kind=f"shape on body {self.name!r}")
         if name in self._shapes:
-            raise ValidationError(f"body {self.name!r} already has a shape named {name!r}")
+            raise ValidationError(f"body {self.name!r} already has a shape named {name!r}; every "
+                                  f"shape needs its own name (in a loop: f'{name}_{{i}}')")
         shape = PlacedShape(name, as_geometry(geometry), Frame(xyz, rpy))
         self._shapes[name] = shape
         return shape

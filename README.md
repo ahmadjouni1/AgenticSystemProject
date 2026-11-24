@@ -64,12 +64,15 @@ uv run python -m viewer runs/<the run folder it prints>
 
 By default the agent uses the context policy (`--context v1`: checkpoints, pinned file
 state, compaction by the cheap model), low reasoning effort once the latest compile passed
-(`--effort adaptive`) and a 15-minute limit (`--max-time 900`). `--context none --effort
-default` gives the step 8 behaviour. The model gets the step 10 system prompt and SDK docs
+(`--effort adaptive`) and a 25-minute limit (`--max-time 1500`; at the limit, a passing,
+fresh build gets one final turn and counts as a success; no fix cycle starts with less than
+`--fix-reserve 120` seconds left). `--two-phase` asks for a skeleton that must pass every
+check before the detail. `--context none --effort default` gives the step 8 behaviour. The model gets the step 10 system prompt and SDK docs
 (`--prompt-set v1`; `v0` is step 9's); `--planning-effort low` lowers the reasoning effort
 before the first compile. Compare batches of runs with
 `uv run python scripts/context_report.py <runs folder> <runs folder>`, or rerun the step 10
-experiment with `scripts/step10_experiment.py` and `scripts/step10_report.py`. Each run's
+experiment with `scripts/step10_experiment.py` and `scripts/step10_report.py` (step 10b:
+`scripts/step10b_experiment.py`, then `step10_report.py --folder runs/step10b --variants B2 D`). Each run's
 `record.json` has quality metrics of its best build (bodies, shapes, joints, share of
 non-box shapes, helpers used, triangles), and `renders/final/` its 4 views.
 
@@ -110,6 +113,7 @@ The steps follow the parts of the original listed in the study.
 | 8 | Agent loop: prompts v0, stop rule (fresh passing compile), end states, best build, run folder with conversation and per-turn record, CLI | Done |
 | 9 | Context and memory: checkpoints (old reasoning not re-sent), pinned file state, doc notes, old-output shortening, compaction, reasoning cap on routine turns, wall-clock budget, optional lessons file; measured before/after | Done |
 | 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment (more detailed objects; planning reasoning not reduced) | Done |
+| 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` option; B2/D experiment prepared | Implemented; experiment not run |
 | 11 | Run storage | Planned |
 | 12 | Evaluation | Planned |
 | 13 | Extras (images, simulation, trajectories) | Planned |

@@ -2426,3 +2426,73 @@ replica), planning effort off.
     for a door on +Y or -Y, no moving parts → -Y.
   - The final renders and the sheets in `runs/step10/renders/` were regenerated.
 - **381 tests pass, 1 skipped.**
+
+## Step 10b: fixes from the step 10 failure analysis
+
+Built from `docs/STEP10_FAILURES.md`; no live runs (the experiment is prepared, not run).
+Defaults kept: prompt set v1, context policy v1, adaptive effort.
+
+### What was built
+
+| # | Change | Files |
+| --- | --- | --- |
+| bug | **Compiler on Windows.** Progress-file writes are best effort: 5 tries, then skipped. A failure whose traceback has no frame in the workspace (and is not a syntax or SDK error), or a crashed worker, is "internal": its message says so, its hint is "compile again without changes", and it is **never cached** | `compiler/worker.py`, `compiler/runner.py` |
+| 1 | **Time limit 25 min** (was 15). When it runs out and the latest compile passed with no edit since: one final turn for the summary (tool calls in it are not run), and the run is a **success** either way. **Fix reserve:** a fix cycle (the turn after a failed compile) does not start with less than 120 s left. `record.json`: `time_limit` (`final_turn` / `stopped` / `no_fix_cycle`), `fix_reserve_s` | `agent/loop.py`, `--max-time`, `--fix-reserve` |
+| 2 | **Contact rule** in the prompt (rule 3: joined parts touch, gap 0, or a pin in a barrel with `allow_overlap`; rule 4: clearance only for parts that move past each other). `joints_and_loops.md`: a "Contact and clearance" section and **two recipes as complete programs**: a door on a carcass with 18 mm panels (`wall_cupboard`), and nesting folding legs (`camp_bench`). Both compile and pass every check, swept collisions included, in `test_docs.py`. The page was compacted to make room: the patterns table became one bullet, and the four-bar text was shortened | `prompts/system.md`, `docs/sdk/joints_and_loops.md` |
+| 3 | **Soft-failing helpers:** `RoundedBoxGeometry` clamps a radius of half the smallest size or more to 0.45 × that size and leaves a notice; the compiler turns notices into `helper_adjusted` **warnings** at the calling line of main.py (`sdk/notices.py`). A self-intersecting profile names the crossing edges, their points and the crossing point; it is checked before ear clipping, which sometimes "succeeded" on such outlines. `ExtrudeWithHolesGeometry` names the hole outside the outline (with a point) or the two overlapping holes. A duplicate shape name suggests `f'foot_{i}'` | `sdk/primitives.py`, `sdk/mesh_geometry.py`, `sdk/solids.py`, `sdk/body.py`, `sdk/notices.py`, `compiler/feedback.py` |
+| 5 | **`--two-phase`:** the task asks for a skeleton (plain primitives at real sizes, the real joints; plan in at most about 10 lines). Its first passing, fresh compile (every check, the motion checks included) adds a `<phase_2>` message asking for detail in groups, compiling after each. The skeleton's version stays the best build unless a phase 2 compile passes. The detail-writing turns are not "routine" (no low effort, no 16k cap) until phase 2 compiles. `record.json`: `two_phase` (phase, skeleton version/turn/minutes, detail compiles) | `agent/loop.py` |
+| 6 | **`scripts/step10b_experiment.py`:** B2 (v1 + fixes) and D (B2 + `--two-phase`), the 4 step 10 prompts × 3 runs, 4 at a time, keep-awake, stop on HTTP 402, `runs/step10b/`. `step10_report.py` takes `--folder` and `--variants`, and adds a time-limit and two-phase table | `scripts/` |
+
+**Sizes** (2.9 characters per token, the test's conservative count; real DeepSeek counts not
+measured, since that needs an API call):
+- `prompts/system.md`: 4,680 characters, at most 1,614 tokens (about 1,190 at step 10's
+  measured ratio);
+- `joints_and_loops.md`: 5,718 characters, at most 1,972 (about 1,740).
+
+### Tests (27 new, no network): 408 pass, 1 skipped
+
+- **Compiler (4):**
+  - a compile passes while every progress write is denied;
+  - internal failures are told apart from main.py's;
+  - internal failures and crashes are not cached;
+  - normal failures still are.
+- **Loop (12, ScriptedModel with a fake clock):**
+  - the defaults;
+  - the final turn at the limit (with text; with tool calls, which are not run);
+  - `time_exceeded` with a failing compile, or with an edit after the pass;
+  - the fix reserve stops and starts;
+  - two-phase: the skeleton → detail messages, the fallback to the skeleton build, a failing
+    skeleton staying in phase 1, and the effort of the detail turns;
+  - no change without the flag.
+- **SDK (8):**
+  - the radius clamp and its notice;
+  - the warning at the calling line through the real compiler;
+  - crossing edges named;
+  - concave profiles still fine;
+  - a hole outside the outline, overlapping holes, and good holes;
+  - the duplicate-name hint.
+- **Docs (+2):** the 2 recipe programs, compiled.
+
+### How Articraft does it
+
+- **Time:** Articraft has no wall clock. Its loop runs up to 100 turns, with "no cost, time
+  or repair budget" (study §8), so it never ends a passing build on time.
+- **Helpers:** its SDK helpers raise on bad arguments, like ours did. There is no "notice"
+  channel; warnings come only from the checks.
+- **Phases:** there is no two-phase mode. Its workflow asks for a brief, then the build, in
+  one pass. The study's replica idea was "explicit stages (plan → build → check → fix)"
+  (§8); the two-phase option is one such stage split, measured on its own (variant D).
+
+### Open ideas and caveats
+
+- **The recipes overlap 2 of the 4 step 10 prompts.** They teach a door on a carcass and
+  folding legs, which are parts of the kitchen-cabinet and folding-table prompts. The objects
+  differ (a one-door wall cupboard, a bench), and the docs test still passes (no example is
+  named after an evaluation object). Still, B2's gains on those 2 prompts may partly come
+  from the docs. Compare the pump and pliers separately, and use new prompts in step 12.
+- **Ear clipping is O(n³):** a 2,000-point outline takes about 30 s. The new crossing check
+  is vectorized (0.17 s). A faster triangulation (or build123d's) would help dense spline
+  outlines.
+- **Phase 1 does not enforce "plain primitives":** a skeleton that uses helpers is accepted.
+  `quality.helpers_used` could warn.
+- **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).

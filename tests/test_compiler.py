@@ -358,3 +358,84 @@ def test_failed_tests_block_export_until_fixed(tmp_path: Path) -> None:
     main.write_text(main.read_text().replace("> 1.0", "> 0.0"))
     fixed = compile(run_dir, timeout=TIMEOUT)
     assert fixed.ok and fixed.version == 0
+
+
+# ---- internal failures (step 10b) ----------------------------------------------------------
+
+
+def test_a_denied_progress_write_does_not_fail_the_compile(tmp_path: Path, monkeypatch) -> None:
+    """Step 10, C pliers run 2: on Windows, os.replace of the progress file raised
+    PermissionError in run_tests() and failed the compile. Progress writes are best effort."""
+    from compiler import worker
+
+    real_replace = os.replace
+
+    def denied(source, target, *args, **kwargs):
+        if str(target).endswith(worker.PROGRESS_FILE):
+            raise PermissionError(13, "Access is denied", str(target))
+        return real_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(worker.os, "replace", denied)
+    monkeypatch.setattr(worker.time, "sleep", lambda _s: None)
+    run_dir = make_run(tmp_path, LAPTOP + "\ndef run_tests(ctx):\n    return None\n")
+    payload = worker.compile_workspace(run_dir.resolve())
+    assert payload["status"] == "success", payload["signals"]
+    assert payload["internal"] is False and payload["progress_writes_skipped"] >= 5
+
+
+def test_internal_failures_are_told_apart_from_main_py_failures(tmp_path: Path) -> None:
+    from compiler.worker import is_internal
+    from sdk.errors import ValidationError
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("def boom():\n    raise RuntimeError('main')\n")
+    namespace: dict = {}
+    exec(compile_source(workspace / "main.py"), namespace)  # noqa: S102 - our own test code
+    try:
+        namespace["boom"]()
+    except RuntimeError as exc:
+        assert not is_internal(exc, workspace)  # raised in main.py
+    try:
+        raise OSError("disk")
+    except OSError as exc:
+        assert is_internal(exc, workspace)  # no frame in the workspace
+    assert not is_internal(ValidationError("bad limits"), workspace)
+    assert not is_internal(SyntaxError("bad"), workspace)
+
+
+def compile_source(path: Path):
+    import builtins  # this module's ``compile`` is the replica's compiler
+
+    return builtins.compile(path.read_text(), str(path), "exec")
+
+
+@pytest.mark.parametrize("payload_line", [
+    json.dumps({"status": "error", "phase": "running baseline checks", "phases": {},
+                "internal": True, "signals": [{"kind": "runtime_error", "message":
+                                               "internal compiler error: OSError: disk",
+                                               "hint": "compile again"}]}),
+    "",  # the worker died without a result: a crash
+], ids=["internal", "crash"])
+def test_internal_failures_are_not_cached(tmp_path: Path, monkeypatch, payload_line) -> None:
+    from compiler import runner
+
+    calls = []
+
+    def fake_worker(run_dir, workspace, timeout):
+        calls.append(1)
+        return {"returncode": 1, "timed_out": False, "payload_line": payload_line,
+                "stray_stdout": "", "stderr": "boom"}
+
+    monkeypatch.setattr(runner, "_run_worker", fake_worker)
+    run_dir = make_run(tmp_path, LAPTOP)
+    first = compile(run_dir, timeout=TIMEOUT)
+    second = compile(run_dir, timeout=TIMEOUT)
+    assert not first.ok and not second.cached and len(calls) == 2
+    assert not (run_dir / "result" / runner.CACHE_FILE).exists()
+
+
+def test_a_normal_failure_is_still_cached(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, FAILURES["runtime"][0])
+    first = compile(run_dir, timeout=TIMEOUT)
+    assert not first.ok and compile(run_dir, timeout=TIMEOUT).cached

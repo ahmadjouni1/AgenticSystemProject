@@ -36,6 +36,10 @@ import time
 
 _STARTED = time.perf_counter()
 PROGRESS_FILE = ".compile-progress.json"
+WRITE_ATTEMPTS = 5
+INTERNAL_HINT = ("This failure comes from the compiler, not from main.py, and is not cached: "
+                 "compile again without changes. If it repeats, simplify the shape it was "
+                 "checking.")
 HANG_FILE = ".compile-hang.txt"
 SIGNALS_FILE = "signals.json"
 LAST_FAILED = "last_failed"
@@ -58,11 +62,13 @@ def _arm_hang_dump(argv: list[str]) -> object | None:
 _HANG_HANDLE = _arm_hang_dump(sys.argv[1:]) if __name__ == "__main__" else None
 
 import contextlib  # noqa: E402
+import dataclasses  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import runpy  # noqa: E402
 import shutil  # noqa: E402
+import traceback as traceback_module  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -78,6 +84,7 @@ class Progress:
         self.phase: str | None = None
         self.phases: dict[str, float] = {}
         self._phase_started = time.perf_counter()
+        self.skipped_writes = 0
 
     @contextlib.contextmanager
     def phase_named(self, name: str):
@@ -89,14 +96,26 @@ class Progress:
             self.phases[name] = round(time.perf_counter() - self._phase_started, 4)
 
     def _write(self) -> None:
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({
+        """Best effort: the file only helps the runner explain a timeout. On Windows,
+        ``os.replace`` fails while another process (an indexer, an antivirus scan, the
+        runner) has the file open; one such PermissionError used to fail a whole compile,
+        and the failure was then cached (step 10, C pliers run 2). Retry, then skip."""
+        text = json.dumps({
             "phase": self.phase,
             "phase_started_unix": time.time(),
             "phases": self.phases,
             "pid": os.getpid(),
-        }), encoding="utf-8")
-        os.replace(temporary, self.path)
+        })
+        temporary = self.path.with_suffix(".tmp")
+        for attempt in range(WRITE_ATTEMPTS):
+            try:
+                temporary.write_text(text, encoding="utf-8")
+                os.replace(temporary, self.path)
+                return
+            except OSError:
+                if attempt + 1 < WRITE_ATTEMPTS:
+                    time.sleep(0.05 * (attempt + 1))
+        self.skipped_writes += 1
 
 
 def compile_workspace(run_dir: Path) -> dict[str, Any]:
@@ -108,6 +127,7 @@ def compile_workspace(run_dir: Path) -> dict[str, Any]:
     signals: list[CompileSignal] = []
     export_info = model_info = None
     traceback_text = ""
+    internal = False
 
     sys.path.insert(0, str(workspace))
     try:
@@ -119,6 +139,11 @@ def compile_workspace(run_dir: Path) -> dict[str, Any]:
 
         traceback_text = "".join(traceback.format_exception(exc))
         signals = [feedback.signal_from_exception(exc, progress.phase or "", workspace)]
+        internal = is_internal(exc, workspace)
+        if internal:
+            signals = [dataclasses.replace(
+                signals[0], message=f"internal compiler error: {signals[0].message}",
+                hint=INTERNAL_HINT)]
     finally:
         if sys.path and sys.path[0] == str(workspace):
             sys.path.pop(0)
@@ -135,7 +160,40 @@ def compile_workspace(run_dir: Path) -> dict[str, Any]:
         "stdout": out.getvalue(),
         "stderr": err.getvalue(),
         "traceback": traceback_text,
+        "internal": internal,
+        "progress_writes_skipped": progress.skipped_writes,
     }
+
+
+def notice_signals(workspace: Path) -> list[CompileSignal]:
+    """Warnings for the adjustments shape helpers made (sdk.notices), each at the deepest
+    workspace line of the call."""
+    from sdk.notices import drain
+
+    out = []
+    for item in drain():
+        where = None
+        for filename, line in item.stack:
+            relative = feedback.relative_path(filename, workspace)
+            if relative is not None:
+                where = (relative, line)
+        signal = feedback.make_signal(feedback.SignalKind.HELPER_ADJUSTED, item.message,
+                                      item.hint, workspace, where)
+        out.append(dataclasses.replace(signal, severity="warning"))
+    return out
+
+
+def is_internal(exc: BaseException, workspace: Path) -> bool:
+    """True when the failure is the compiler's own, not main.py's: no frame of the
+    traceback is in the workspace, and it is not a syntax error or an SDK error (those
+    report a problem with the model, raised from SDK code on main.py's behalf)."""
+    from sdk.errors import SDKError
+
+    if isinstance(exc, (SyntaxError, SDKError)):
+        return False
+    root = str(workspace.resolve()).lower()
+    frames = traceback_module.extract_tb(exc.__traceback__)
+    return not any(str(Path(f.filename).resolve()).lower().startswith(root) for f in frames)
 
 
 def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Progress):
@@ -145,16 +203,17 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
 
     with progress.phase_named("loading main.py"):
         namespace = runpy.run_path(str(main_path), run_name="__main__")
+    adjusted = notice_signals(workspace)  # helpers that repaired an argument
     with progress.phase_named("getting object_model"):
         model = namespace.get("object_model")
         if not isinstance(model, Assembly):
-            return [feedback.signal_object_model(model, workspace)], None, None
+            return [*adjusted, feedback.signal_object_model(model, workspace)], None, None
     with progress.phase_named("validating the assembly"):
         art = model.validate()
     model_info = {"name": model.name, "bodies": len(model.bodies), "joints": len(model.joints),
                   "closures": len(art.closures), "mimics": len(art.mimic_order)}
     ctx = TestContext(model)
-    signals: list[CompileSignal] = []
+    signals: list[CompileSignal] = list(adjusted)
     run_tests = namespace.get("run_tests")
     if callable(run_tests):
         with progress.phase_named(feedback.TESTS_PHASE):
@@ -163,6 +222,7 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
     with progress.phase_named(feedback.CHECKS_PHASE):
         report = run_checks(model, ctx)
     signals += feedback.signals_from_report(report, workspace)
+    signals += notice_signals(workspace)  # helpers called in run_tests() or later
     model_info["check_seconds"] = round(sum(report.timings.values()), 4)
     signals_json = json.dumps([s.to_dict() for s in signals], indent=2)
     if any(s.severity == "failure" for s in signals):

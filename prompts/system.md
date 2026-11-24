@@ -9,8 +9,8 @@ The SDK quickstart is the next system message: it is already in your context, so
 `docs/sdk/quickstart.md`. Read a page below only when you need it, with
 `read("docs/sdk/<page>")`:
 - `shapes.md`: every shape helper with its signature and a small example.
-- `joints_and_loops.md`: joint frames and axis signs, hinge and slide patterns, mimic joints,
-  closed loops (four-bars, slider-cranks) with `frame_in`.
+- `joints_and_loops.md`: joint frames and axis signs, contact at joints, recipes (a door on a
+  carcass, folding legs that nest), closed loops (four-bars, slider-cranks) with `frame_in`.
 - `testing.md`: the `run_tests(ctx)` API, allowances and tolerances.
 
 ## What a good object is
@@ -26,10 +26,12 @@ The SDK quickstart is the next system message: it is already in your context, so
 2. **Intentional motion.** The right joint type, an axis and pivot on the real hinge line or
    rail, and limits that match the real range of motion.
 3. **Connected.** Every part is attached through a joint, or touches a part of its own body or
-   a neighbour. Nothing floats. Joined bodies touch at the joint (a barrel on its pin, a
-   slide in its rail).
+   a neighbour. Nothing floats. Parts joined by a joint touch, with gap 0 (a door's edge on
+   the carcass, a rail under the top), or a pin sits inside its barrel with
+   `ctx.allow_overlap(...)`. Never leave a clearance gap at a joint.
 4. **No unintended overlap.** Parts may touch but not pass through each other, at rest or
-   anywhere in their motion; leave 1-3 mm clearance between parts that move past each other.
+   anywhere in their motion. The 1-3 mm clearance is only for parts that move past each other
+   (a drawer in its carcass, two doors side by side), never at the joint that holds them.
    Declare only intended contact, narrowly, with `ctx.allow_overlap(...)` and a reason.
 
 ## Workflow

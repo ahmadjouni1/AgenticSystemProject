@@ -181,8 +181,16 @@ def compile(run_dir: str | os.PathLike[str], timeout: float = DEFAULT_TIMEOUT, *
         "traceback": payload.get("traceback", ""), "worker_stdout": run["stray_stdout"],
         "worker_stderr": run["stderr"], "hang_dump": run.get("hang_dump", ""),
     })
-    _write_cache(result_dir, result, timeout, summary)
+    if not internal_failure(payload, signals):
+        _write_cache(result_dir, result, timeout, summary)
     return result
+
+
+def internal_failure(payload: dict[str, Any], signals: list[CompileSignal]) -> bool:
+    """A failure of the compiler itself (an exception outside main.py, or a worker that
+    died without a result). Never cached: the same main.py deserves a fresh try."""
+    return bool(payload.get("internal")) or any(
+        s.kind == feedback.SignalKind.CRASH.value for s in signals)
 
 
 # ---- the subprocess ------------------------------------------------------------------------

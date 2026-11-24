@@ -210,10 +210,57 @@ def ensure_ccw(points: np.ndarray) -> np.ndarray:
     return points if signed_area(points) >= 0 else points[::-1].copy()
 
 
+def _fmt(point) -> str:
+    return f"({point[0]:.4g}, {point[1]:.4g})"
+
+
+def first_crossing(points: np.ndarray) -> tuple[int, int, np.ndarray] | None:
+    """(i, j, point): edge i (points[i] -> points[i+1]) properly crosses edge j (i < j), the
+    first such pair; None if no two edges cross. Edges that only touch at an end, or overlap
+    along a line (a keyhole bridge), do not count."""
+    points = np.asarray(points, dtype=float)
+    n = len(points)
+    if n < 4:
+        return None
+    a = points
+    r = np.roll(points, -1, axis=0) - points  # edge vectors
+    i, j = np.triu_indices(n, k=2)
+    keep = ~((i == 0) & (j == n - 1))  # the closing edge is adjacent to edge 0
+    i, j = i[keep], j[keep]
+    denom = r[i, 0] * r[j, 1] - r[i, 1] * r[j, 0]
+    diff = a[j] - a[i]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (diff[:, 0] * r[j, 1] - diff[:, 1] * r[j, 0]) / denom
+        u = (diff[:, 0] * r[i, 1] - diff[:, 1] * r[i, 0]) / denom
+    eps = 1e-9
+    hit = (np.abs(denom) > _EPS) & (t > eps) & (t < 1 - eps) & (u > eps) & (u < 1 - eps)
+    if not hit.any():
+        return None
+    k = int(np.argmax(hit))
+    return int(i[k]), int(j[k]), a[i[k]] + t[k] * r[i[k]]
+
+
+def describe_self_intersection(points: np.ndarray) -> str:
+    """The error for a profile that cannot be triangulated: which edges cross, and where."""
+    points = np.asarray(points, dtype=float)
+    n = len(points)
+    found = first_crossing(points)
+    if found is None:
+        return ("profile polygon intersects itself (no two edges cross: look for a repeated "
+                "point or an edge that doubles back on the previous one)")
+    i, j, at = found
+    return (f"profile polygon intersects itself: edge {i} {_fmt(points[i])} -> "
+            f"{_fmt(points[(i + 1) % n])} crosses edge {j} {_fmt(points[j])} -> "
+            f"{_fmt(points[(j + 1) % n])} at {_fmt(at)} (edge k joins point k to point k+1; "
+            "list the outline's points in order around it)")
+
+
 def triangulate_polygon(points: np.ndarray) -> list[tuple[int, int, int]]:
     """Ear-clip a simple 2D polygon. Triangles are counter-clockwise; indices are into
     ``points``, and every point is used, so a cap shares every edge with its tube."""
     points = np.asarray(points, dtype=float)
+    if first_crossing(points) is not None:  # ear clipping can "succeed" on these (step 10b)
+        raise ValidationError(describe_self_intersection(points))
     order = list(range(len(points)))
     if signed_area(points) < 0:
         order.reverse()
@@ -242,7 +289,7 @@ def triangulate_polygon(points: np.ndarray) -> list[tuple[int, int, int]]:
                         if abs(cross(order[k - 1], order[k], order[(k + 1) % count])) <= _EPS),
                        None)
             if ear is None:
-                raise ValidationError("profile polygon intersects itself")
+                raise ValidationError(describe_self_intersection(points))
         triangles.append((order[ear - 1], order[ear], order[(ear + 1) % count]))
         del order[ear]
     triangles.append((order[0], order[1], order[2]))

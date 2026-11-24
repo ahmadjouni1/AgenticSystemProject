@@ -54,6 +54,8 @@ class SignalKind(StrEnum):
     ISLANDS = "islands"
     DIMENSIONS = "dimensions"
     ALLOWANCE = "allowance"
+    # A shape helper repaired an argument instead of failing (step 10b; a warning).
+    HELPER_ADJUSTED = "helper_adjusted"
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,8 @@ HINTS = {
     SignalKind.ISLANDS: "Make the shapes of one body touch or overlap slightly.",
     SignalKind.DIMENSIONS: "Check the units: the SDK works in meters.",
     SignalKind.ALLOWANCE: "Remove the allowance; nothing needs it.",
+    SignalKind.HELPER_ADJUSTED: "A shape helper changed an argument to build the shape; pass a "
+                                "valid value to choose it yourself.",
 }
 
 _CHECK_KINDS = {
@@ -429,3 +433,8 @@ def render_signals(
         lines += _rules(failures[0], repeat_count)
     lines.append("</compile_signals>")
     return "\n".join(lines)
+
+
+# Public names for the worker's notice signals (step 10b).
+relative_path = _relative
+make_signal = _signal

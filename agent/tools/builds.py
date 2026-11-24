@@ -34,6 +34,7 @@ class Build:
     note: str | None = None
     scene: Any = None  # sdk.testing.CollisionScene, made on first use
     size: float | None = None  # rest-pose bounding-box diagonal, m
+    front: Any = None  # the side the views face (agent.tools.render.build_front), made on first use
 
     def collision_scene(self):
         if self.scene is None:

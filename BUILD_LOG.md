@@ -2399,3 +2399,30 @@ replica), planning effort off.
 - **More runs:** 3 runs per cell cannot separate 1 success from noise. Step 12 needs 5 or
   more.
 - **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).
+
+### Follow-up: failure analysis and renderer fixes (no API calls)
+
+- **Failure analysis:** `docs/STEP10_FAILURES.md`, made with `scripts/step10_failures.py`.
+  - 9 of the 10 B/C failures are `time_exceeded`; 2 of those had a passing build and were
+    only verifying.
+  - Planning is 57% of the time, and model calls of 200 s or more are 56%.
+  - Most collision failures are main parts (45 of 75), not details.
+  - 9 of 18 floating failures are the prompt's 1-2 mm clearance.
+  - The ranked fixes: the time limit and end state, docs/prompt joint contact and recipes,
+    soft-failing helpers.
+  - It also found a compiler bug on Windows (`os.replace` of the progress file, then a cached
+    error). Not fixed yet.
+- **Renderer** (`agent/tools/render.py`):
+  - **A per-pixel depth buffer** replaces the painter's sort by triangle centroid, which drew
+    hidden faces over near ones: the dark wedges. It uses scanline spans, vectorized with
+    numpy. Final renders of 30-120k-triangle builds take 1-2.5 s for 4 views.
+  - **The views face the object's front.** That is the horizontal side whose front view
+    (plus a quarter of the iso view) shows the largest area of moving bodies, in m². -Y stays
+    the default unless another side shows 10% more. Labels name the real directions; with a
+    -Y front the views are the old fixed ones.
+  - **The light comes from the upper left,** so the front (the iso view's left face) is lit.
+  - 7 tests in `tests/test_render.py`: a hidden triangle that centroid sorting drew on top,
+    a box with exactly 3 visible faces, the default views equal to the old ones, the facing
+    for a door on +Y or -Y, no moving parts → -Y.
+  - The final renders and the sheets in `runs/step10/renders/` were regenerated.
+- **381 tests pass, 1 skipped.**

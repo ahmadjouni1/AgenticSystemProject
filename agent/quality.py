@@ -81,36 +81,29 @@ def render_final(run_dir: str | Path, best: dict[str, Any] | None) -> list[str]:
     paths (relative to the run folder); [] if there is no build."""
     from PIL import Image
 
-    from agent.tools.builds import world_meshes
-    from agent.tools.render import HEIGHT, VIEWS as VIEW_DIRS, WIDTH, rasterize
+    from agent.tools.builds import Build, world_meshes
+    from agent.tools.render import HEIGHT, WIDTH, build_front, rasterize, views
     from viewer.loader import load_version
 
     if best is None:
         return []
     run_dir = Path(run_dir)
-    loaded = load_version(run_dir / best["path"])
-    rest = loaded.assembly.solve({})
-    meshes = world_meshes(_LoadedBuild(loaded), rest.transforms)
+    build = Build(best["version"], load_version(run_dir / best["path"]))
+    meshes = world_meshes(build, build.loaded.assembly.solve({}).transforms)
+    directions = views(build_front(build))  # facing the side with the moving parts
     folder = run_dir / "renders" / "final"
     folder.mkdir(parents=True, exist_ok=True)
     sheet = Image.new("RGB", (2 * WIDTH, 2 * HEIGHT), (255, 255, 255))
     paths = []
     for i, view in enumerate(VIEWS):
-        forward, label = VIEW_DIRS[view]
-        image = rasterize(meshes, forward, f"{best['version']}  {label}")
+        forward, right, label = directions[view]
+        image = rasterize(meshes, forward, f"{best['version']}  {label}", right)
         image.save(folder / f"{view}.png")
         sheet.paste(image, ((i % 2) * WIDTH, (i // 2) * HEIGHT))
         paths.append(f"renders/final/{view}.png")
     sheet.save(folder / "views.png")
     paths.append("renders/final/views.png")
     return paths
-
-
-class _LoadedBuild:
-    """The little of ``agent.tools.builds.Build`` that ``world_meshes`` needs."""
-
-    def __init__(self, loaded) -> None:
-        self.loaded = loaded
 
 
 __all__ = ["HELPERS", "helpers_used", "quality", "render_final"]

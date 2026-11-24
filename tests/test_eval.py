@@ -478,7 +478,8 @@ def test_the_baseline_starts_no_run_that_could_pass_the_total_or_reach_peak(tmp_
     s = baseline.Settings("articraft", runs_root=tmp_path, max_cost=0.30, max_time=1500,
                           off_peak_only=True)
     evening = datetime(2026, 11, 24, 21, 0, tzinfo=UTC)  # a Tuesday, off-peak
-    worst = 0.30 + baseline.overshoot(evening)
+    worst = baseline.worst_run(s, evening)
+    assert worst == pytest.approx(0.30 + 2 * baseline.overshoot(evening))
     assert 0.05 < baseline.overshoot(evening) < 0.10
     assert baseline.may_start(s, 0.0, 3.0, evening) is None
     assert "total cap" in baseline.may_start(s, 3.0 - worst + 0.01, 3.0, evening)
@@ -510,4 +511,32 @@ def test_the_baseline_dry_run_shows_plan_estimate_and_balance(tmp_path) -> None:
                             now=datetime(2026, 11, 24, 21, 0, tzinfo=UTC))
     assert len(re.findall(r" start$", text, re.M)) == 12 and "articraft generate" in text
     assert "start now: yes" in text and "DeepSeek balance: 9.99 USD" in text
-    assert "7 of 12 runs start even if every run ends at" in text
+    assert "6 of 12 runs start even if every run ends at" in text
+
+
+def test_a_call_articraft_never_recorded_is_priced_and_only_interruptions_rerun(
+        tmp_path) -> None:
+    s = baseline.Settings("articraft", runs_root=tmp_path)
+    j = job(tmp_path)
+    run = fake_articraft_run(j.folder, "error",
+                             "model query failed: ModelError: DeepSeek output was truncated.")
+    (run / "conversation.jsonl").write_text(json.dumps(
+        {"role": "assistant", "token_usage": {"input_tokens": 26_000, "output_tokens": 500}}),
+        encoding="utf-8")
+    started = datetime(2026, 11, 24, 21, 0, tzinfo=UTC)
+    record = baseline.convert(j, run, None, 255, started, s)
+    assert record["cost_estimated_usd"] == pytest.approx(baseline.unrecorded_call(run, started))
+    assert 0.05 < record["cost_estimated_usd"] < 0.10
+    assert record["cost_usd"] == pytest.approx(record["cost_recorded_usd"]
+                                               + record["cost_estimated_usd"], abs=1e-6)
+    assert not baseline.rerun(record)  # Articraft's own error is a result
+    stopped = baseline.convert(j, run, "outside", 300, started, s)
+    assert stopped["cost_estimated_usd"] > 0 and baseline.rerun(stopped)
+    assert baseline.rerun({}) and baseline.rerun({"status": "error", "reason":
+                                                  "articraft: DeepSeek request failed "
+                                                  "(HTTP 402): Insufficient Balance"})
+    assert not baseline.rerun({"status": "success"})
+    other = job(tmp_path / "c")
+    clean = baseline.convert(other, fake_articraft_run(other.folder, "success"), None, 100,
+                             started, s)
+    assert clean["cost_estimated_usd"] == 0

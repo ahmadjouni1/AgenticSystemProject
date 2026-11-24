@@ -112,8 +112,15 @@ def load(eval_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     return benchmark, rows
 
 
-INTERRUPTIONS = ("HTTP 402", "Insufficient Balance", "APIConnectionError",
-                 "failed after", "APITimeoutError")
+INTERRUPTIONS = {  # a mark in an ``error`` run's reason -> why it was cut off
+    "HTTP 402": "out of credit (HTTP 402)",
+    "Insufficient Balance": "out of credit (HTTP 402)",
+    "APIConnectionError": "connection failure",
+    "failed after": "connection failure",
+    "APITimeoutError": "connection failure",
+    "DeepSeek request failed: ": "connection failure",  # Articraft, after its retries
+    "stopped from outside": "stopped from outside",  # e.g. the baseline script stopped
+}
 
 
 def interrupted(status: str, record: dict[str, Any] | None) -> str | None:
@@ -124,10 +131,9 @@ def interrupted(status: str, record: dict[str, Any] | None) -> str | None:
         return status
     reason = record.get("reason") or ""
     if status == "error":
-        for mark in INTERRUPTIONS:
+        for mark, why in INTERRUPTIONS.items():
             if mark in reason:
-                return "out of credit (HTTP 402)" if mark in INTERRUPTIONS[:2] else \
-                    "connection failure"
+                return why
     return None
 
 

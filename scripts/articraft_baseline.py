@@ -157,10 +157,41 @@ def cost_of(token_usage: dict[str, Any], at: datetime | None = None) -> float:
 
 
 def overshoot(at: datetime | None = None) -> float:
-    """How far past its cap a stopped run can end: the call in flight when the cap is
-    passed, at most one full reply (32k output tokens) on a long, mostly cached context."""
+    """The price of one full reply (32k output tokens) on a long, mostly cached context: how
+    far past its cap one call can take a run (``worst_run`` counts two)."""
     return cost_of({"input_tokens": 200_000, "cached_input_tokens": 180_000,
                     "output_tokens": 32_000}, at)
+
+
+def unrecorded_call(run: Path, at: datetime | None = None) -> float:
+    """A conservative price for the call Articraft never recorded: it saves token counts
+    only after a call succeeds, so a reply cut off at the output cap, or a call in flight
+    when the run is stopped, is missing from its record.json. Priced as a full reply
+    (32k output tokens) on the last call's context plus what has been added since."""
+    last: dict[str, Any] = {}
+    log = run / "conversation.jsonl"
+    if log.is_file():
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("role") == "assistant" and event.get("token_usage"):
+                last = event["token_usage"]
+    context = int(last.get("input_tokens", 0)) + int(last.get("output_tokens", 0)) + 20_000
+    return cost_of({"input_tokens": context,
+                    "cached_input_tokens": int(last.get("input_tokens", 0)),
+                    "output_tokens": 32_000}, at)
+
+
+def rerun(record: dict[str, Any]) -> bool:
+    """Whether a job starts (again): never run, or cut off by something outside Articraft
+    (out of credit, a connection failure, stopped from outside). Articraft's own errors,
+    a reply cut off at the output cap among them, are results and are kept."""
+    from eval_report import interrupted
+
+    status = record.get("status")
+    return status in (None, "not_started") or bool(interrupted(status or "", record))
 
 
 def deepseek_balance() -> str:
@@ -196,10 +227,17 @@ def replica_mean_cost(name: str = "v1") -> tuple[float, int] | None:
     return (sum(costs) / len(costs), len(costs)) if costs else None
 
 
+def worst_run(settings: Settings, at: datetime | None = None) -> float:
+    """The most one run can cost: its cap, the reply that crosses the cap (the watcher sees
+    the cost only after a call returns), and the next call, already in flight when the
+    run is stopped, which its record prices with ``unrecorded_call``."""
+    return settings.max_cost + 2 * overshoot(at)
+
+
 def may_start(settings: Settings, spent: float, max_total: float,
               now: datetime | None = None) -> str | None:
     """Why the next run may not start now, or None. A run may start only if it cannot pass
-    ``max_total`` even when stopped at its cap with a full reply in flight, and, with
+    ``max_total`` even at its worst case (``worst_run``), and, with
     ``off_peak_only``, only if it cannot reach DeepSeek's peak hours before its time limit."""
     now = now or datetime.now(UTC)
     if settings.off_peak_only:
@@ -208,7 +246,7 @@ def may_start(settings: Settings, spent: float, max_total: float,
             return (f"peak price: a run started now ({now:%a %H:%M} UTC) could reach DeepSeek's "
                     f"peak hours before its {settings.max_time / 60:.0f}-minute limit; "
                     "rerun off-peak to start the rest")
-    worst = settings.max_cost + overshoot(now)
+    worst = worst_run(settings, now)
     if spent + worst > max_total + 1e-9:
         return (f"total cap: ${spent:.2f} spent + up to ${worst:.2f} for another run > "
                 f"${max_total:.2f}")
@@ -250,13 +288,18 @@ def convert(job: Job, run: Path | None, stopped: str | None, seconds: float,
             started: datetime, settings: Settings) -> dict[str, Any]:
     """A replica-style record of one Articraft run."""
     record = read_json(run / "record.json") if run else {}
-    spent = cost_of(record.get("token_usage") or {}, started)
+    recorded = cost_of(record.get("token_usage") or {}, started)
     status = record.get("status", "error" if run else "not_started")
     error = record.get("error") or ""
+    estimated = unrecorded_call(run, started) if run and (stopped or "truncated" in error) \
+        else 0.0
+    spent = recorded + estimated
     if stopped == "cost":
         status, reason = "budget_exceeded", f"stopped at ${spent:.4f} (cap ${settings.max_cost})"
     elif stopped == "time":
         status, reason = "time_exceeded", f"stopped after {seconds:.0f} s"
+    elif stopped == "outside":
+        status, reason = "error", f"stopped from outside after {seconds:.0f} s"
     elif status == "success":
         reason = "articraft: success"
     elif "max turns" in error:
@@ -276,7 +319,9 @@ def convert(job: Job, run: Path | None, stopped: str | None, seconds: float,
         "updated": datetime.now(UTC).isoformat(timespec="seconds"),
         "duration_s": round(seconds, 2), "turns": turns_of(run) if run else 0,
         "cost_usd": round(spent, 6), "cost_note": "computed from Articraft's token counts "
-        "with llm/config.py PRICES (Articraft records no DeepSeek cost)",
+        "with llm/config.py PRICES (Articraft records no DeepSeek cost), plus an estimate "
+        "for a call it never recorded (cut off, or in flight when stopped)",
+        "cost_recorded_usd": round(recorded, 6), "cost_estimated_usd": round(estimated, 6),
         "tokens": record.get("token_usage") or {},
         "best": best, "articraft_run": run.relative_to(job.folder).as_posix() if run else None,
         "articraft_status": record.get("status"), "articraft_error": error,
@@ -372,9 +417,8 @@ def main(argv: list[str] | None = None) -> int:
         Path(settings.benchmark).read_text(encoding="utf-8"), encoding="utf-8")
     spent = spent_so_far(jobs)
     for job in jobs:
-        if read_json(job.folder / "record.json").get("status") not in (None, "error",
-                                                                        "not_started"):
-            continue  # finished in an earlier invocation
+        if not rerun(read_json(job.folder / "record.json")):
+            continue  # finished in an earlier invocation (a result, even an error)
         why = may_start(settings, spent, args.max_total)
         if why:
             print(f"STOPPED: {why}", flush=True)
@@ -420,18 +464,17 @@ def dry_run(settings: Settings, jobs: list[Job], max_total: float,
     spent = spent_so_far(jobs)
     for job in jobs:
         status = read_json(job.folder / "record.json").get("status")
-        action = "start" if status in (None, "error", "not_started") else f"done: {status}"
+        action = "start" if rerun(read_json(job.folder / "record.json")) else             f"done: {status}"
         lines.append(f"  {job.key:<22} {job.category:<12} {action}")
     lines.append(f"command (first run): {subprocess.list2cmdline(command(jobs[0], settings))}"
                  if jobs else "no runs")
-    worst = settings.max_cost + overshoot(now)
+    worst = worst_run(settings, now)
     mean = replica_mean_cost()
     lines.append(
         "estimated cost per run: no Articraft data yet. Our builder averaged "
         + (f"${mean[0]:.3f} over {mean[1]} runs of this benchmark (eval_v1)" if mean else "?")
         + f"; Articraft sends effort high on every turn, so expect more. Capped at "
-        f"${settings.max_cost:.2f}: up to ${worst:.2f} with the reply in flight when it is "
-        "stopped.")
+        f"${settings.max_cost:.2f}: up to ${worst:.2f} with the replies around the stop.")
     fits = sum(1 for k in range(len(jobs)) if spent + k * worst + worst <= max_total + 1e-9)
     lines.append(f"spent so far ${spent:.2f}; worst case: {min(fits, len(jobs))} of "
                  f"{len(jobs)} runs start even if every run ends at ${worst:.2f}; at our "

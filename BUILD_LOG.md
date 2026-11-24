@@ -3006,3 +3006,64 @@ Runs with at least one failed compile of each kind (all runs), and the kind of t
   - **Worst case:** at most $0.38 per run, so at least 7 of 12 runs start under $3.
   - **Balance:** $6.05. That is $3.81 below the $9.86 after the top-up, exactly our tracked
     spend; the $6.10 read right after the evaluation was lagging.
+
+### Articraft baseline: eval_articraft_v1 (2026-11-24, 21:39-23:29 UTC, off-peak)
+
+`scripts/articraft_baseline.py --max-total 3 --off-peak-only`: the 12 benchmark prompts x 1
+run through the original Articraft in WSL. Same model (`deepseek-v4-pro`), same caps
+($0.30, 25 min, 60 turns, 32,000 output tokens), Articraft's own prompt, docs and checks,
+and its DeepSeek default effort `high`. All 12 ran before peak, one at a time. The full
+report is `runs/eval_articraft_v1/report.md`.
+
+**Comparison with our eval_v1** (B2 default; 34 counted runs, 2-3 per prompt):
+
+| category | success: ours | success: Articraft | cost/run: ours | cost/run: Articraft | cost/success: ours | cost/success: Articraft | time: ours | time: Articraft |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| single | 6/6 | 1/2 | $0.049 | $0.085 | $0.049 | $0.169 | 244 s | 233 s |
+| chain | 5/8 | 1/3 | $0.238 | $0.259 | $0.381 | $0.778 | 970 s | 727 s |
+| independent | 6/6 | 1/2 | $0.136 | $0.197 | $0.136 | $0.393 | 562 s | 568 s |
+| loop | 3/8 | 1/3 | $0.236 | $0.150 | $0.628 | $0.450 | 1047 s | 462 s |
+| tool | 6/6 | 2/2 | $0.121 | $0.204 | $0.121 | $0.204 | 494 s | 600 s |
+| **overall** | **26/34 (76%, 60-88%)** | **6/12 (50%, 25-75%)** | **$0.165** | **$0.183** | **$0.216** | **$0.367** | 704 s | 531 s |
+
+- **The 95% intervals overlap, so indicative only.** On run 1 alone, the same 12 prompts
+  once each, ours was 8/11 counted: excavator_arm-r1 was interrupted by the 402, and all
+  three loops failed.
+- **What ended Articraft's runs: the output cap, 5 of 12 runs.** jewelry box (turn 2),
+  scissor lift (3), pantograph (3), pickup truck (5) and boom arm (13) each ended with
+  "DeepSeek output was truncated".
+  - **Why it hits the cap:** Articraft sends effort `high` on every turn, and a reply cut
+    at the cap ends its run as an error.
+  - **Ours:** our loop handles a cut-off reply and continues, and B2 sends `low` effort on
+    routine turns.
+  - **The other 7 runs:** 6 succeeded. Excavator arm was stopped at the cost cap after 31
+    turns.
+  - **So most of the gap is robustness to long reasoning, not modelling ability.** With
+    Articraft's own default output cap (32,768) the result would be the same; a larger cap
+    or a lower effort would be a different baseline.
+- **Where Articraft did as well or better:**
+  - **Loops:** 1/3, the wipers. It was faster on the runs that finished.
+  - **The most detailed model:** its grand piano has 125 shapes (ours averaged 33 in that
+    category).
+- **What is not compared:** Articraft's builds are not checked by our checks (USDZ only;
+  `usd-core` not approved), and our quality columns for it come from its `model.json`
+  only. Failed-compile counts are not recorded for Articraft.
+- **Accounting found by the first run, fixed before the rest.**
+  - **The gap:** Articraft records tokens only for calls that succeed, so a cut-off reply
+    is missing from its record.
+  - **The fix:**
+    - Records now add a conservative estimate for such a call (`cost_estimated_usd`).
+    - Only interrupted runs rerun; an Articraft error is a result.
+    - The start rule counts two replies past a run's cap: the excavator arm ended at
+      $0.40, past the $0.38 the old rule allowed.
+  - **The stopped attempt:** the robot arm run was stopped seconds in, to make the fix.
+    It is kept as `record.01.json` ($0.091, mostly the estimate) and counts in the spend.
+  - **Tests:** 2 new; 23 eval tests pass.
+- **Spend.**
+  - **Tracked:** $2.29 in all, counting the estimates and the stopped robot-arm attempt.
+    Counted runs come to $2.20.
+  - **Provider:** the balance went $6.05 → **$3.99**, a drop of $2.06.
+  - **The difference:** the estimates for the 7 unrecorded calls (about $0.08 each)
+    overstate them by about $0.03 each, or the balance still lags a little.
+  - **The budget plan:** the baseline stayed within its $3.
+  - **Left:** $3.99, against the planned solver re-test ($2) and the margin.

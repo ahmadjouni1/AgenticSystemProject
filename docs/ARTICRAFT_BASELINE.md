@@ -1,11 +1,11 @@
-# Articraft baseline (step 12): set up, no paid runs yet
+# Articraft baseline (step 12)
 
 `scripts/articraft_baseline.py` runs the step 12 benchmark (`prompts/benchmark_v1.json`) through
 the original Articraft, with the same model as our builder (`deepseek-v4-pro`, Articraft's own
 DeepSeek provider) and the same per-run caps.
 - **Set up:** WSL is installed and Articraft runs in it. A free end-to-end check with an
   invalid key went through the whole path (2026-11-24).
-- **Not yet run with a real key.**
+- **Run:** `eval_articraft_v1`, 12 prompts x 1 run, on 2026-11-24 (results in BUILD_LOG).
 - **Tests** (`tests/test_eval.py`, no WSL or network): command building, cost computation,
   the start rules, stopping and record conversion.
 
@@ -78,12 +78,21 @@ uv run python scripts/eval_report.py --name articraft_v1 --no-log      # the sam
   `eval_report.py` and `python -m agent --list` work on the baseline too.
 - **How runs are taken:** one at a time, in the benchmark's round-robin order by category.
 - **The total cap.** A run starts only if `--max-total` (default $1.50) cannot be passed
-  even if the run ends at its cap plus a full reply in flight. That is $0.30 + about $0.08
-  off-peak, or about $0.16 at peak.
+  even at the run's worst case: its $0.30 cap, the reply that crosses the cap, and the
+  next call already in flight when the run is stopped. That is $0.30 + 2 x about $0.08
+  off-peak, or about $0.46 (about $0.62 at peak).
+- **Calls Articraft never records.** Articraft saves token counts only after a call
+  succeeds. A reply cut off at the output cap, or a call in flight when the run is
+  stopped, is missing from its `record.json`. The converted record adds a conservative
+  estimate for it (`cost_estimated_usd`: a full 32k reply on the last context), apart
+  from the recorded part (`cost_recorded_usd`).
+- **Which runs rerun.** Only runs cut off from outside: out of credit, a connection
+  failure, or stopped from outside. Articraft's own errors, a cut-off reply among them,
+  are results and are kept.
 - **`--off-peak-only`:** a run starts only if it cannot reach DeepSeek's peak hours
   (01-04 and 06-10 UTC on weekdays) before its 25-minute limit.
-- **Reruns.** A rerun skips finished jobs. Jobs that ended in `error` start again from
-  scratch, since Articraft cannot resume. The earlier attempt's record is kept as
+- **Reruns.** A rerun skips finished jobs, Articraft's own errors included. Interrupted
+  jobs start again from scratch, since Articraft cannot resume. The earlier attempt's record is kept as
   `record.NN.json`, and its cost still counts toward `--max-total`.
 
 ## What is the same, and what is not

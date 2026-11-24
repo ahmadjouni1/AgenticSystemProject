@@ -113,7 +113,7 @@ The steps follow the parts of the original listed in the study.
 | 8 | Agent loop: prompts v0, stop rule (fresh passing compile), end states, best build, run folder with conversation and per-turn record, CLI | Done |
 | 9 | Context and memory: checkpoints (old reasoning not re-sent), pinned file state, doc notes, old-output shortening, compaction, reasoning cap on routine turns, wall-clock budget, optional lessons file; measured before/after | Done |
 | 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment (more detailed objects; planning reasoning not reduced) | Done |
-| 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` option; B2/D experiment prepared | Implemented; experiment not run |
+| 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` (optional high-detail mode); every model call capped at the time left | Done: B2 (the new default) 10/12 at $0.137 per success; D (two-phase) 9/12 at $0.194, more detail |
 | 11 | Run storage | Planned |
 | 12 | Evaluation | Planned |
 | 13 | Extras (images, simulation, trajectories) | Planned |

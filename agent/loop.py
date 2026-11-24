@@ -19,7 +19,10 @@ or ``<final_response_required>`` reminder is added and the loop goes on.
 **Time limit** (25 min by default, step 10b). When it runs out and the latest compile passed
 with no edit after it, the model gets one final turn for its summary and the run ends as a
 success; otherwise ``time_exceeded``. A fix cycle (the turn after a failed compile) does not
-start with less than ``fix_reserve_s`` (2 min) left.
+start with less than ``fix_reserve_s`` (2 min) left. Every model call gets the time left as
+its timeout, retries included, and an output cap the model can write in that time (step 10b
+follow-up: one cut-off reply took up to 9.5 min and carried two runs 91 s and 351 s past
+the limit).
 
 **Two-phase build** (``two_phase=True``, step 10b). Phase 1 asks for a skeleton (plain
 primitives at real sizes, the real joints); its first passing compile (every check, the
@@ -60,8 +63,8 @@ from agent.tools import BY_NAME, ToolContext, ToolOutput, run_tool, schemas
 from compiler import compile as compile_run
 from compiler import workspace_digest
 from compiler.feedback import failure_signature
-from llm import (Budget, BudgetExceeded, CallLog, LLMError, Message, System, ToolResult, Usage,
-                 User)
+from llm import (Budget, BudgetExceeded, CallLog, CallTimeLimit, LLMError, Message, System,
+                 ToolResult, Usage, User)
 from llm.messages import to_chat, tools_to_chat
 from llm.protocol import UNKNOWN, Model, Reply
 
@@ -101,6 +104,11 @@ RUNS_ROOT = REPLICA_ROOT / "runs"
 MAX_TURNS = 60
 MAX_TIME_S = 25 * 60  # wall clock per run (step 10b; 15 min before)
 FIX_RESERVE_S = 120  # no fix cycle starts with less time left (median fix cycle: 1.3 min)
+FINAL_TURN_S = 120  # the final turn's own allowance, after the time is up
+DEFAULT_TOKENS_PER_S = 60  # output speed before the run has measured its own (DeepSeek, step
+# 10/10b builder calls with >= 2k output tokens: 10th percentile 60, median 75 tokens/s)
+CALL_OVERHEAD_S = 15  # reading the prompt before the first output token, roughly
+MIN_OUTPUT_TOKENS = 2_000  # the output cap never goes lower; the timeout still holds
 MAX_EMPTY_REPLIES = 3
 MAX_SAME_FAILURES = 5
 MAX_REFUSED_FINISHES = 3
@@ -506,6 +514,37 @@ class _Run:
         compiled = self.per_turn[-1].get("compile")
         return bool(compiled) and compiled["status"] != "success"
 
+    def time_left(self) -> float | None:
+        if self.max_time_s is None:
+            return None
+        return self.max_time_s - (time.time() - self.started)
+
+    def output_rate(self) -> float:
+        """Output tokens per second: the median over this run's long replies so far."""
+        rates = sorted(t["output_tokens"] / t["latency_s"] for t in self.per_turn
+                       if t.get("output_tokens", 0) >= 2_000 and t.get("latency_s"))
+        return rates[len(rates) // 2] if rates else DEFAULT_TOKENS_PER_S
+
+    def timed(self, options: dict[str, Any], metrics: dict[str, Any],
+              allowance: float | None = None) -> dict[str, Any]:
+        """Cap a call at the time left: its timeout, and an output cap the model can write
+        in that time (so it ends with a reply rather than being cut off)."""
+        left = self.time_left() if allowance is None else allowance
+        if left is None:
+            return options
+        left = max(left, 1.0)
+        options = {**options, "timeout_s": round(left, 1)}
+        metrics["timeout_s"] = options["timeout_s"]
+        default = getattr(self.model, "max_output_tokens", None)
+        if isinstance(default, int):
+            current = options.get("max_output_tokens", default)
+            cap = max(MIN_OUTPUT_TOKENS,
+                      int(self.output_rate() * max(0.0, left - CALL_OVERHEAD_S) * 0.9))
+            if cap < current:
+                options["max_output_tokens"] = cap
+                metrics["output_cap"] = cap
+        return options
+
     def time_check(self) -> tuple[str, str] | None:
         """The end of the run if the clock says so; None to go on."""
         if self.max_time_s is None:
@@ -545,12 +584,18 @@ class _Run:
                        "max_output_tokens": self.effort.routine_max_output_tokens}
             self.effort_turns["routine"] += 1
             metrics["effort"] = options["effort"]
-        reply = self.model.query(sent, self.tools, **options)
-        metrics.update(self.account(reply))
-        self.add(reply.message(), finish_reason=reply.finish_reason, not_run=bool(
-            reply.tool_calls))
-        metrics["tools_not_run"] = [c.name for c in reply.tool_calls]
-        text = reply.text.strip()
+        options = self.timed(options, metrics, allowance=FINAL_TURN_S)
+        text = ""
+        try:
+            reply = self.model.query(sent, self.tools, **options)
+        except CallTimeLimit:  # the passing build is the result anyway
+            metrics["timed_out"] = True
+        else:
+            metrics.update(self.account(reply))
+            self.add(reply.message(), finish_reason=reply.finish_reason, not_run=bool(
+                reply.tool_calls))
+            metrics["tools_not_run"] = [c.name for c in reply.tool_calls]
+            text = reply.text.strip()
         if text:
             self.final_text = text
         metrics["finished"] = True
@@ -620,8 +665,19 @@ class _Run:
                 else:
                     self.effort_turns["default"] += 1
                 metrics["effort"] = options.get("effort", "default")
+            options = self.timed(options, metrics)
             try:
                 reply = self.model.query(sent, self.tools, **options)
+            except CallTimeLimit:
+                metrics["timed_out"] = True
+                elapsed = time.time() - self.started
+                self.record("running")
+                if self.finish_blocker() is None:
+                    return self.final_turn(elapsed)
+                self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "call_cut"}
+                return "time_exceeded", (f"the model call was cut off at the time limit after "
+                                         f"{elapsed:.0f} s (the limit is "
+                                         f"{self.max_time_s:.0f} s)")
             except BudgetExceeded as exc:
                 if exc.reply is not None:  # paid for: keep it in the record
                     metrics.update(self.account(exc.reply))
@@ -733,7 +789,8 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
     model's settings. ``max_time_s``: wall-clock budget (end state ``time_exceeded``).
     ``lessons``: use and update runs/lessons.md (off by default). ``prompt_set``: the system
     prompt, quickstart and docs (``PROMPT_SETS``; "v0" is step 9's). ``fix_reserve_s``: no fix
-    cycle starts with less time left. ``two_phase``: skeleton first, then detail."""
+    cycle starts with less time left. ``two_phase``: skeleton first, then detail (an optional
+    high-detail mode; off by default)."""
     if isinstance(prompt_set, str):
         prompt_set = PROMPT_SETS[prompt_set]
     run_dir = Path(run_dir).resolve() if run_dir is not None else new_run_dir(prompt, runs_root)
@@ -753,6 +810,6 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
                 max_time_s, lessons, prompt_set, fix_reserve_s, two_phase).run()
 
 
-__all__ = ["DEFAULT_PROMPT_SET", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS",
+__all__ = ["DEFAULT_PROMPT_SET", "FINAL_TURN_S", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS", "PROMPT_SETS",
            "EffortPolicy",
            "PromptSet", "RunResult", "best_build", "new_run_dir", "run"]

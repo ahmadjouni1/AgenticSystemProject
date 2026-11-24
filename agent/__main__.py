@@ -2,6 +2,12 @@
 
     uv run python -m agent "a laptop that opens and closes"
     uv run python -m agent "a four-bar linkage" --role cheap --max-cost 0.5 --max-turns 40
+    uv run python -m agent "a camera on a tripod" --two-phase     # high-detail mode
+
+The defaults are step 10b's B2 setup: prompt set v1, context policy v1, adaptive effort, a
+25-minute limit with a final turn and a 2-minute fix reserve. ``--two-phase`` (skeleton
+first, then detail) is an optional high-detail mode: in step 10b it gave more shaped parts
+(89% vs 75% non-box) at about 40% more cost per success, with no gain in success rate.
 
 Prints one line per turn (tools, compile status, cost) and the run folder. Open the result
 with ``uv run python -m viewer <run folder>``. Keys come from the environment or
@@ -82,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fix-reserve", type=float, default=FIX_RESERVE_S,
                         help="no fix cycle starts with fewer seconds left (0: off)")
     parser.add_argument("--two-phase", action="store_true",
-                        help="skeleton first (must pass every check), then detail")
+                        help="high-detail mode: a skeleton first (must pass every check), then "
+                             "the detail; about 40%% more cost per success")
     args = parser.parse_args(argv)
     load_env()
     run_dir = new_run_dir(args.prompt, args.runs)

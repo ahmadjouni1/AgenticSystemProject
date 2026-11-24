@@ -63,9 +63,12 @@ class Model(Protocol):
     model: str
 
     def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = (), *,
-              effort: str | None = None, max_output_tokens: int | None = None) -> Reply:
+              effort: str | None = None, max_output_tokens: int | None = None,
+              timeout_s: float | None = None) -> Reply:
         """One model call. Raises LLMError (ProviderError, BudgetExceeded) on failure.
-        ``effort`` / ``max_output_tokens`` override the model's settings for this call."""
+        ``effort`` / ``max_output_tokens`` override the model's settings for this call.
+        ``timeout_s``: the most wall-clock time the call may take, retries included
+        (``CallTimeLimit`` when it runs out)."""
 
 
 class LLMError(RuntimeError):
@@ -79,6 +82,11 @@ class ProviderError(LLMError):
                  attempts: int = 1):
         super().__init__(message)
         self.status, self.retryable, self.attempts = status, retryable, attempts
+
+
+class CallTimeLimit(ProviderError):
+    """The call ran out of the time it was given (``timeout_s``: what is left of the run's
+    time). The provider may still bill the tokens it generated, so its cost is unknown."""
 
 
 class BudgetExceeded(LLMError):

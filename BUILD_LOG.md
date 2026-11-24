@@ -2429,8 +2429,9 @@ replica), planning effort off.
 
 ## Step 10b: fixes from the step 10 failure analysis
 
-Built from `docs/STEP10_FAILURES.md`; no live runs (the experiment is prepared, not run).
-Defaults kept: prompt set v1, context policy v1, adaptive effort.
+Built from `docs/STEP10_FAILURES.md`. Experiment run on 2026-11-24 (results below). **B2
+is now the default setup** (prompt set v1, context policy v1, adaptive effort, the fixes
+below); `--two-phase` stays an optional high-detail mode.
 
 ### What was built
 
@@ -2496,3 +2497,106 @@ measured, since that needs an API call):
 - **Phase 1 does not enforce "plain primitives":** a skeleton that uses helpers is accepted.
   `quality.helpers_used` could warn.
 - **REQUIRED before any OpenAI evaluation:** the Responses API adapter (step 6).
+
+### Measurement (DeepSeek builder = deepseek-v4-pro, $1 cap, 2026-11-24 10:07-11:38 UTC)
+
+- **Setup:** the 4 step 10 prompts × 3 runs × 2 variants, 4 at a time, jobs interleaved,
+  keep-awake on. Command: `scripts/step10b_experiment.py --runs 3 --jobs 4`; tables from
+  `scripts/step10_report.py --folder runs/step10b --variants B2 D`, saved in
+  `runs/step10b/report.md`. Render sheets: `runs/step10b/renders/` (one per successful run,
+  one `<prompt>__iso.png` per prompt).
+- **The variants:**
+  - **B2:** step 10's B (prompt set v1) plus the fixes above (no flag needed);
+  - **D:** B2 plus `--two-phase`.
+- **No run was excluded:** no sleep, no connection errors, no HTTP 402.
+- **Spend:** $3.12 (B2 $1.37, D $1.75).
+
+**Per variant (12 runs each), with step 10 for comparison:**
+
+| Variant | Success | Turns | Failed compiles | Reasoning before 1st compile (mean / median) | Cost / run | Cost / success | Time / run |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A (step 10): step 9 prompt | 9/12 | 8.8 | 1.1 | 28,272 / 15,178 | $0.106 | $0.141 | 528 s |
+| B (step 10): v1 prompt | 7/12 | 9.6 | 1.8 | 31,181 / 24,515 | $0.136 | $0.233 | 673 s |
+| C (step 10): B + low planning effort | 7/12 | 10.6 | 2.0 | 27,536 / 24,136 | $0.140 | $0.240 | 701 s |
+| **B2**: B + step 10b fixes | **10/12** | 10.3 | 1.2 | 24,889 / 20,986 | $0.114 | **$0.137** | 720 s |
+| **D**: B2 + two-phase | 9/12 | 14.9 | 1.4 | 34,318 / 20,714 | $0.146 | $0.194 | 918 s |
+
+- **End states:** B2: 10 success, 2 time_exceeded. D: 9 success, 3 time_exceeded. Every
+  failure is the pump.
+- **Two-phase (D):** the skeleton passed every check in 10 of 12 runs, after a median of
+  5.8 min. One failed run (pump 3) has a passing skeleton as its best build: it passed at
+  21.8 min, and the detail did not pass before the limit.
+- **Time limit outcomes:** B2: 2 `stopped`. D: 2 `stopped`, 1 `no_fix_cycle`. No run needed
+  the final turn: every success finished on its own.
+
+**Quality of the successful builds** (means; triangles: median):
+
+| Variant | Builds | Bodies | Shapes | Joints | Non-box shapes | Helpers / run | Triangles |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| B (step 10) | 7 | 3.1 | 14.0 | 2.1 | 78% | 2.3 | 30,944 |
+| B2 | 10 | 3.1 | 13.9 | 2.2 | 75% | 1.7 | 31,728 |
+| D | 9 | 3.2 | 15.6 | 2.2 | **89%** | **3.1** | 106,136 |
+
+**Per prompt** (success, cost per run):
+
+| Prompt | B (step 10) | B2 | D |
+| --- | --- | --- | --- |
+| kitchen cabinet with two doors and a drawer | 2/3, $0.149 | 3/3, $0.098 | 3/3, $0.130 |
+| folding table | 3/3, $0.111 | 3/3, $0.047 | 3/3, $0.136 |
+| crank-slider pump | 0/3, $0.180 | 1/3, $0.258 | 0/3, $0.220 |
+| pair of pliers | 2/3, $0.104 | 3/3, $0.053 | 3/3, $0.098 |
+
+**Reading:**
+- **B2 is the best setup so far:** 10/12 at $0.137 per success, against B's 7/12 at
+  $0.233 (and A's 9/12 at $0.141). It becomes the default.
+- **Caveat (see above):** the new recipes match the cabinet and the folding table. On the
+  two prompts they do not cover, the pliers went from 2/3 to 3/3; the pump stayed bad.
+- **D buys detail, not success.** It has more shaped parts (89% vs 75% non-box) and more
+  helpers (3.1 vs 1.7 per run), for 42% more cost per success and 28% more time per run. It
+  stays as `--two-phase`, an optional high-detail mode.
+- **The pump is the hard case, and it fails in planning.** Its runs spend 35k-95k reasoning
+  tokens before the first compile (mean 46k in B2, 85k in D), against 7k-36k for the other
+  three prompts. 5 of the 6 pump runs had 2-3 replies cut off at the 32k output limit, with
+  no answer and no tool call. The first compile came after 9.4-24 minutes of model time.
+  With one compile left to fix, the runs ran out of time. **The slider-crank is a target
+  for a later step:** a solver or recipe that places the crank, rod and slider from a few
+  numbers (crank radius, rod length, stroke axis), so the model does not reason the loop
+  closure out by hand.
+- **Two runs ran past the limit:** B2 pump 2 ended at 1852 s (+352 s) and D pump 2 at
+  1592 s (+92 s). The limit was checked only between turns, and one cut-off reply takes
+  7-9.5 minutes. Fixed below.
+
+### Follow-up: each model call capped at the time left
+
+- **What:** every model call gets the run's time left as its timeout, and an output cap the
+  model can write in that time.
+  - **Timeout:** `model.query(..., timeout_s=left)` covers the whole call, retries included.
+    Each HTTP attempt gets `min(per-attempt timeout, time left)`. A backoff never sleeps past
+    the deadline. No attempt starts with less than 5 s left. Running out raises
+    `CallTimeLimit` (a `ProviderError`). Its call-log entry has cost `unknown`, since the
+    provider may bill what it generated.
+  - **Output cap:** `rate × (left − 15 s) × 0.9` tokens, at least 2,000, only when lower
+    than the call's own cap. The rate is the median over the run's replies of 2k+ tokens,
+    else 60 tokens/s. That default is the 10th percentile of 216 step 10/10b builder calls,
+    whose median is 75 tokens/s.
+  - **When a call is cut off:** if the latest compile passed and nothing changed since, the
+    final turn follows, with its own 120 s; the run is a success even if that turn is cut
+    off too. Otherwise the run ends `time_exceeded`, with `time_limit.outcome = "call_cut"`.
+  - **`record.json`:** `per_turn[].timeout_s`, `output_cap` and `timed_out`.
+- **Files:** `llm/protocol.py` (`CallTimeLimit`, `timeout_s`), `llm/base.py`,
+  `llm/openai_chat.py` (deadline-aware `call_with_retries`), `llm/scripted.py`
+  (`model.timeouts`), `agent/loop.py` (`timed`, `output_rate`, `FINAL_TURN_S`).
+- **Tests (11, no network, `tests/test_time_cap.py`):**
+  - the loop's timeouts follow the time left, and calls have no timeout without a limit;
+  - the output cap;
+  - a cut call ends `time_exceeded` with no overrun, or leads to the final turn after a
+    passing build (also when that turn is cut off);
+  - in the adapter: an attempt's timeout, a retry and its backoff within the deadline, no
+    retry after it (cost unknown), a timeout with time left still retried;
+  - ScriptedModel keeps timeouts apart from options.
+- **Left over:**
+  - The context policy's compaction call (the cheap model) and a compile are not capped by
+    the time left. A compile has its own 300 s timeout (in step 10, at most 39 s of
+    tool time per run), so a run can still end late in the worst case.
+  - The cap does not tell the model that its output is short. It gets the `<reply_cut_off>`
+    note as before.

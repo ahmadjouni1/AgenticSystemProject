@@ -36,6 +36,7 @@ class ScriptedModel(ChatModelBase):
         self.replies = list(replies)
         self.requests: list[tuple[list[Message], tuple[Tool, ...]]] = []
         self.options: list[dict[str, Any]] = []  # per-call overrides (effort, ...)
+        self.timeouts: list[float | None] = []  # per-call timeout_s (kept apart from options)
         self._ids = 0
 
     def _cost(self, usage: Usage, at: datetime) -> Cost:
@@ -44,7 +45,9 @@ class ScriptedModel(ChatModelBase):
     def _complete(self, messages: list[Message], tools: tuple[Tool, ...],
                   options: dict[str, Any]) -> Completion:
         self.requests.append((list(messages), tools))
-        self.options.append(dict(options))
+        options = dict(options)
+        self.timeouts.append(options.pop("timeout_s", None))
+        self.options.append(options)
         if not self.replies:
             raise LLMError(f"ScriptedModel has no reply left (call {len(self.requests)})")
         reply = self.replies.pop(0)

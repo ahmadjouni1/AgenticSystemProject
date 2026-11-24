@@ -16,7 +16,7 @@ from typing import Any
 from llm import accounting
 from llm.accounting import Budget, CallLog
 from llm.messages import Message, System, Tool, ToolCall, tools_to_chat, validate
-from llm.protocol import Cost, ProviderError, Reply, Usage
+from llm.protocol import UNKNOWN, CallTimeLimit, Cost, ProviderError, Reply, Usage
 
 
 @dataclass
@@ -69,12 +69,15 @@ class ChatModelBase:
         return accounting.cost(self.model, usage, at)
 
     def query(self, messages: list[Message], tools: tuple[Tool, ...] | list[Tool] = (), *,
-              effort: str | None = None, max_output_tokens: int | None = None) -> Reply:
+              effort: str | None = None, max_output_tokens: int | None = None,
+              timeout_s: float | None = None) -> Reply:
         """One call. ``effort`` / ``max_output_tokens`` override the model's settings for
-        this call only (the loop lowers reasoning on routine turns)."""
+        this call only (the loop lowers reasoning on routine turns). ``timeout_s`` caps the
+        call's wall-clock time, retries included (the loop passes the run's time left)."""
         tools = tuple(tools)
         options = {k: v for k, v in (("effort", effort),
-                                     ("max_output_tokens", max_output_tokens)) if v is not None}
+                                     ("max_output_tokens", max_output_tokens),
+                                     ("timeout_s", timeout_s)) if v is not None}
         validate(messages, tools)
         if self.budget is not None:
             self.budget.before_call()
@@ -89,7 +92,9 @@ class ChatModelBase:
         except ProviderError as exc:
             self._log({**base, "status": "error", "latency_s": _since(started),
                        "retries": exc.attempts - 1, "http_status": exc.status,
-                       "error": redact(str(exc), self._secrets), "cost": 0.0})
+                       "error": redact(str(exc), self._secrets),
+                       # a call cut off by its time limit may still be billed
+                       "cost": UNKNOWN if isinstance(exc, CallTimeLimit) else 0.0})
             raise
         reply = Reply(done.text, done.tool_calls, done.usage, self._cost(done.usage, at),
                       done.raw, self.provider, done.model, done.finish_reason, done.reasoning,

@@ -16,7 +16,8 @@ from llm import config
 from llm.accounting import Budget, CallLog, cost
 from llm.env import load_env
 from llm.messages import Assistant, Message, System, Tool, ToolCall, ToolResult, User
-from llm.protocol import UNKNOWN, BudgetExceeded, LLMError, Model, ProviderError, Reply, Usage
+from llm.protocol import (UNKNOWN, BudgetExceeded, CallTimeLimit, LLMError, Model,
+                          ProviderError, Reply, Usage)
 from llm.scripted import ScriptedModel
 
 
@@ -39,6 +40,7 @@ def get_model(role: str, *, run_dir: str | Path | None = None,
         supports_images=choice.images)
 
 
-__all__ = ["UNKNOWN", "Assistant", "Budget", "BudgetExceeded", "CallLog", "LLMError", "Message",
+__all__ = ["UNKNOWN", "Assistant", "Budget", "BudgetExceeded", "CallLog", "CallTimeLimit",
+           "LLMError", "Message",
            "Model", "ProviderError", "Reply", "ScriptedModel", "System", "Tool", "ToolCall",
            "ToolResult", "Usage", "User", "config", "cost", "get_model", "load_env"]

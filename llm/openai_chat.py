@@ -19,7 +19,7 @@ from llm.accounting import Budget, CallLog
 from llm.base import ChatModelBase, Completion, redact
 from llm.config import Provider, RetryPolicy
 from llm.messages import Message, Tool, assistant_from_chat, to_chat, tools_to_chat
-from llm.protocol import LLMError, ProviderError, Usage
+from llm.protocol import CallTimeLimit, LLMError, ProviderError, Usage
 
 Create = Callable[..., Any]
 
@@ -61,16 +61,35 @@ def retry_after(exc: Exception) -> float | None:
         return None
 
 
-def call_with_retries(call: Callable[[], Any], policy: RetryPolicy, provider: str,
+MIN_ATTEMPT_S = 5.0  # no attempt (first or retry) starts with less time left
+
+
+def call_with_retries(call: Callable[..., Any], policy: RetryPolicy, provider: str,
                       sleep: Callable[[float], None] = time.sleep,
-                      jitter: Callable[[], float] = random.random) -> tuple[Any, int]:
-    """(result, retries). Exponential backoff with jitter, honouring Retry-After."""
+                      jitter: Callable[[], float] = random.random, *,
+                      timeout_s: float | None = None,
+                      clock: Callable[[], float] = time.monotonic) -> tuple[Any, int]:
+    """(result, retries). Exponential backoff with jitter, honouring Retry-After.
+
+    With ``timeout_s`` (the call's whole allowance), each attempt is ``call(left)`` with the
+    seconds left, and no attempt or backoff runs past it: ``CallTimeLimit`` instead.
+    Without it, ``call()`` takes no argument."""
+    deadline = None if timeout_s is None else clock() + timeout_s
     for attempt in range(policy.max_retries + 1):
+        left = None if deadline is None else deadline - clock()
+        if left is not None and left < MIN_ATTEMPT_S:
+            raise CallTimeLimit(f"{provider}: the call's {timeout_s:.0f} s ran out "
+                                f"({attempt} attempts made)", attempts=max(attempt, 1))
         try:
-            return call(), attempt
+            return (call() if left is None else call(left)), attempt
         except (openai.APIConnectionError, openai.APIStatusError) as exc:
             retryable, status = classify(exc)
             what = f"HTTP {status}" if status else type(exc).__name__
+            if deadline is not None and isinstance(exc, openai.APITimeoutError) \
+                    and deadline - clock() < MIN_ATTEMPT_S:
+                raise CallTimeLimit(f"{provider}: the call's {timeout_s:.0f} s ran out "
+                                    f"during attempt {attempt + 1}",
+                                    attempts=attempt + 1) from exc
             if not retryable:
                 raise ProviderError(f"{provider} refused the request ({what}): {exc}",
                                     status=status, attempts=attempt + 1) from exc
@@ -83,6 +102,8 @@ def call_with_retries(call: Callable[[], Any], policy: RetryPolicy, provider: st
             server = retry_after(exc)
             if server is not None:
                 delay = max(delay, min(server, policy.max_delay_s))
+            if deadline is not None:
+                delay = max(0.0, min(delay, deadline - clock() - MIN_ATTEMPT_S))
             sleep(delay)
     raise AssertionError("unreachable")
 
@@ -94,9 +115,11 @@ class OpenAIChatModel(ChatModelBase):
                  sleep: Callable[[float], None] = time.sleep,
                  jitter: Callable[[], float] = random.random,
                  budget: Budget | None = None, log: CallLog | None = None,
-                 role: str | None = None, supports_images: bool = False):
+                 role: str | None = None, supports_images: bool = False,
+                 clock: Callable[[], float] = time.monotonic):
         super().__init__(model, budget=budget, log=log, role=role)
         self.provider = provider.name
+        self._clock = clock
         self.supports_images = supports_images
         self.settings = provider
         self.effort, self.max_output_tokens, self.timeout_s = effort, max_output_tokens, timeout_s
@@ -131,15 +154,23 @@ class OpenAIChatModel(ChatModelBase):
         effort = (options or {}).get("effort", self.effort)
         if effort:
             body["reasoning_effort"] = effort
-        body["timeout"] = self.timeout_s
+        body["timeout"] = self.timeout_s  # per attempt; _complete lowers it to the time left
         return body
 
     def _complete(self, messages: list[Message], tools: tuple[Tool, ...],
                   options: dict[str, Any]) -> Completion:
         body = self.request(messages, tools, options)
+        allowance = (options or {}).get("timeout_s")
+
+        def attempt(left: float | None = None) -> Any:
+            if left is None:
+                return self._create(**body)
+            return self._create(**{**body, "timeout": min(self.timeout_s, left)})
+
         try:
-            response, retries = call_with_retries(lambda: self._create(**body), self.retry,
-                                                  self.provider, self._sleep, self._jitter)
+            response, retries = call_with_retries(attempt, self.retry, self.provider,
+                                                  self._sleep, self._jitter, timeout_s=allowance,
+                                                  clock=self._clock)
         except ProviderError as exc:
             exc.args = (redact(str(exc), self._secrets),)
             raise

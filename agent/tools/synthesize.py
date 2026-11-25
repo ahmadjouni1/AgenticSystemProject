@@ -21,6 +21,7 @@ The whole result is saved in the run folder (``synthesis/NN-<mechanism>.json``).
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import numpy as np
@@ -32,13 +33,17 @@ from sdk.transforms import invert
 from solvers.base import SolverError, SolverResult, SolverTimeout, solve_isolated
 
 MECHANISMS = ("four_bar", "slider_crank", "serial_arm")
-DEFAULT_TIME_LIMIT_S = 100.0
+DEFAULT_TIME_LIMIT_S = 180.0  # the solve's own limit; it then returns its best design
 MAX_TIME_LIMIT_S = 240.0
 STARTUP_S = 60.0  # the solver process starts, imports, and verifies the final design
 MAX_PATH_POINTS = 40
 SYSTEM_LINE = ("- `synthesis.md`: the `synthesize` tool, which computes a four-bar's, a "
                "slider-crank's or a serial arm's dimensions from a target path, and "
                "`target_path`, which makes compile check that path.")
+LINKAGE_RULE = ("**Linkages** (four-bar, slider-crank, scissor, pantograph, wipers): first choose "
+                "the motion\nnumbers yourself (sweep angle, stroke, lift height, scale), call "
+                "`synthesize` for the\ndimensions, build around them, and declare `target_path` "
+                "so compile verifies the motion.")
 
 
 def _frames(build) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -115,7 +120,26 @@ def _save(ctx: ToolContext, mechanism: str, request: dict[str, Any],
     return path.relative_to(ctx.run_dir).as_posix()
 
 
+CALL_LOG = "synthesis_calls"  # ctx.cache key: one entry per call, for the run record
+
+
 def run_synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
+    entry: dict[str, Any] = {"mechanism": args.get("mechanism")}
+    try:
+        out = _synthesize(ctx, args)
+        entry.update(outcome="within_tolerance" if out["within_tolerance"] else "outside",
+                     error_max_mm=out["error_mm"]["max"], solve_s=out["seconds"])
+        return out
+    except ToolError as exc:
+        entry["outcome"] = exc.kind
+        raise
+    finally:
+        entry["wall_s"] = round(time.perf_counter() - started, 2)
+        ctx.cache.setdefault(CALL_LOG, []).append(entry)
+
+
+def _synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     mechanism, target = args["mechanism"], args["target"]
     constraints = dict(args.get("constraints") or {})
     limit = constraints.get("time_limit_s", DEFAULT_TIME_LIMIT_S)

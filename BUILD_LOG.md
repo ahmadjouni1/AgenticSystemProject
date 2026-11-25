@@ -3137,3 +3137,11 @@ The WSL copy included the teammate's two synthesis tools (Articraft commits `03f
 - **Command** (off-peak, after 10:00 UTC on weekdays):
   `uv run python scripts/eval.py --name synth_v1 --runs 2 --jobs 2 --benchmark prompts/benchmark_synthesis.json --max-total 2 --off-peak-only --agent-args "--prompt-set v2"`
 - **A risk for the result:** none of these prompts states a target path. The model has to choose one itself (a wiper arc, a piston stroke, a lift height), as Articraft's runs did not.
+
+### Before the re-test (2026-11-25, no API calls)
+
+- **v2 prompt:** a two-line rule opens the Workflow section. For linkages (four-bar, slider-crank, scissor, pantograph, wipers), first choose the motion numbers (sweep angle, stroke, lift height, scale), call `synthesize` for the dimensions, build around them, and declare `target_path`. The v2 system prompt is 1,748 tokens by the docs test's count, under the 2,000 limit. v1 is unchanged.
+- **Tool time limit 180 s** (was 100 s). This is the solve's own limit, after which it returns its best design; the process is killed 60 s later.
+- **Recorded per run** (`record.json` → `synthesis`): every synthesize call (mechanism, outcome, error, wall time), the total solve time, whether the final build declares `target_path`, and its trajectory-check summary. Compile results carry that summary, cached ones included.
+- **`scripts/synthesis_report.py`:** the with/without comparison (success, cost per run and per success, time, reasoning before the first compile, tool-use rate) and a per-run table.
+- **Tests:** +1 (a scripted v2 run records one failed synthesize call and a final build whose target path passed; v1 does not offer the tool); the prompt test checks the rule's place and that v2 minus its two inserts equals v1.

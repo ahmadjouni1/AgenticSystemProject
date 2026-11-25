@@ -3,7 +3,7 @@
 When a point must follow a path (a wiper tip sweeping an arc, a piston stroke, a tool tracing
 a line), do not work the lengths out in your head: `synthesize` computes them. It returns
 the dimensions, the path they predict and the error. Each call runs up to
-`time_limit_s` (default 100 s).
+`time_limit_s` (default 180 s).
 
 The target is plain data: `{"points": [[x, y, z], ...], "tolerance": 0.002}`, in meters,
 in order of motion (3 to 400 points, the more the better).

@@ -75,6 +75,8 @@ class CompileResult:
     repeat_count: int = 0
     """How many compiles in a row (this one included) failed in exactly this way."""
     log_path: Path | None = None
+    target_path: dict | None = None
+    """The trajectory check's summary when main.py declares target_path (step 13)."""
 
     @property
     def ok(self) -> bool:
@@ -176,6 +178,7 @@ def compile(run_dir: str | os.PathLike[str], timeout: float = DEFAULT_TIMEOUT, *
         returncode=run["returncode"],
         repeat_count=repeat,
         log_path=log_path,
+        target_path=(payload.get("model") or {}).get("target_path"),
     )
     _log(log_path, {
         "digest": digest, "cached": False, "status": status, "duration": result.duration,
@@ -312,7 +315,7 @@ def _cached(result_dir: Path, digest: str, timeout: float) -> CompileResult | No
         export_dir=export_dir, phase=data.get("phase"), phases=data.get("phases", {}),
         duration=0.0, startup=None, cached=True, digest=digest,
         returncode=data.get("returncode"), repeat_count=data.get("repeat_count", 0),
-        log_path=result_dir / LOG_FILE,
+        log_path=result_dir / LOG_FILE, target_path=data.get("target_path"),
     )
 
 
@@ -324,7 +327,7 @@ def _write_cache(result_dir: Path, result: CompileResult, timeout: float, summar
         "version": result.version,
         "export_dir": str(result.export_dir) if result.export_dir else None,
         "phase": result.phase, "phases": result.phases, "returncode": result.returncode,
-        "repeat_count": result.repeat_count,
+        "repeat_count": result.repeat_count, "target_path": result.target_path,
     }, indent=2))
 
 

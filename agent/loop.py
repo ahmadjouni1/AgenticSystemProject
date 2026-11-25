@@ -61,9 +61,12 @@ from agent import lessons as lessons_file
 from agent import storage
 from agent.context import ContextPolicy, checkpoint_text
 from agent.tools import BY_NAME, ToolContext, ToolOutput, run_tool, schemas
+from agent.tools.synthesize import CALL_LOG as SYNTHESIS_CALLS
+from agent.tools.synthesize import LINKAGE_RULE
 from agent.tools.synthesize import SYSTEM_LINE as SYNTHESIS_LINE
 from compiler import compile as compile_run
 from compiler import workspace_digest
+from compiler import feedback as feedback_phases
 from compiler.feedback import failure_signature
 from fileio import append_line, atomic_copy, atomic_write_json
 from llm import (Budget, BudgetExceeded, CallLog, CallTimeLimit, LLMError, Message, System,
@@ -86,8 +89,8 @@ class PromptSet:
     docs_dir: Path
     task: str  # formatted with {prompt}
     synthesis: bool = False
-    """Step 13: offer the synthesize tool, and list docs/sdk/synthesis.md in the system prompt
-    (one line after the testing.md line)."""
+    """Step 13: offer the synthesize tool, list docs/sdk/synthesis.md in the system prompt
+    (one line after the testing.md line), and open the workflow with the linkage rule."""
 
     def system_text(self) -> str:
         text = self.system.read_text(encoding="utf-8")
@@ -97,7 +100,10 @@ class PromptSet:
         at = next(i for i, line in enumerate(lines) if line.startswith("- `testing.md`"))
         while at + 1 < len(lines) and lines[at + 1].startswith("  "):  # wrapped bullet
             at += 1
-        return "".join([*lines[:at + 1], SYNTHESIS_LINE + "\n", *lines[at + 1:]])
+        lines.insert(at + 1, SYNTHESIS_LINE + "\n")
+        workflow = lines.index("## Workflow\n")
+        lines[workflow + 2:workflow + 2] = [LINKAGE_RULE + "\n\n"]  # after the blank line
+        return "".join(lines)
 
 
 PROMPT_SETS = {
@@ -315,6 +321,8 @@ class _Run:
         self.unknown_cost_calls = 0
         self.per_turn: list[dict[str, Any]] = []
         self.tool_counts: Counter[str] = Counter()
+        self.prior_synthesis_calls: list[dict[str, Any]] = []  # earlier sessions' calls
+        self.target_paths: dict[str, Any] = {}  # build ("v0003" / "last_failed") -> summary
         self.compiles = {"calls": 0, "passed": 0, "failed": 0, "cached": 0}
         self.empty_replies = 0
         self.refused_finishes = 0
@@ -349,6 +357,9 @@ class _Run:
         compiles = record.get("compiles") or {}
         self.compiles = {k: int(compiles.get(k, 0)) for k in self.compiles}
         self.tool_counts = Counter(record.get("tool_calls") or {})
+        synthesis = record.get("synthesis") or {}
+        self.prior_synthesis_calls = list(synthesis.get("calls") or [])
+        self.target_paths = dict(synthesis.get("target_paths") or {})
         self.doc_reads = Counter(record.get("doc_reads") or {})
         self.effort_turns = Counter(record.get("effort_turns") or {})
         two = record.get("two_phase")
@@ -429,6 +440,7 @@ class _Run:
                          "last_version": f"v{last.version:04d}" if last and last.version
                          is not None else None},
             "tool_calls": dict(self.tool_counts),
+            "synthesis": self.synthesis_summary(best),
             "tokens": self.usage.to_dict(),
             "cost_usd": round(self.cost, 6), "unknown_cost_calls": self.unknown_cost_calls,
             "budget": self.budget.to_dict(),
@@ -485,6 +497,20 @@ class _Run:
                 "allowance": {"max_time_s": self.max_time_s, "max_turns": self.max_turns,
                               "max_cost_usd": self.budget.max_cost_usd,
                               "max_calls": self.budget.max_calls}}
+
+    def synthesis_summary(self, best: dict[str, Any] | None) -> dict[str, Any]:
+        """Step 13: the synthesize calls, and the trajectory check of the final build
+        (``declared`` is None when that is unknown: no build, or an older record)."""
+        calls = self.prior_synthesis_calls + list(self.ctx.cache.get(SYNTHESIS_CALLS, []))
+        final = None if best is None else best["version"]
+        known = final in self.target_paths
+        path = self.target_paths.get(final)
+        return {"calls": calls, "count": len(calls),
+                "solve_seconds": round(sum(c.get("wall_s", 0) for c in calls), 2),
+                "final_build": final,
+                "final_declared_target_path": (path is not None) if known else None,
+                "final_target_path": path,
+                "target_paths": self.target_paths}
 
     def planning_metrics(self) -> dict[str, Any]:
         """Tokens spent up to and including the turn that first calls compile (all of the
@@ -585,6 +611,10 @@ class _Run:
 
     def after_compile(self) -> dict[str, Any]:
         result = self.ctx.last_compile
+        if result.ok and result.version is not None:
+            self.target_paths[f"v{result.version:04d}"] = result.target_path
+        elif result.phase in (feedback_phases.CHECKS_PHASE, feedback_phases.TARGET_PHASE):
+            self.target_paths["last_failed"] = result.target_path  # checks ran, then failed
         self.compiles["calls"] += 1
         self.compiles["cached"] += int(result.cached)
         if result.ok:

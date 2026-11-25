@@ -15,8 +15,10 @@ import time
 import numpy as np
 import pytest
 
-from agent.loop import PROMPT_SETS
+from agent.loop import PROMPT_SETS, run
 from agent.tools import ToolContext, run_tool, schemas
+from agent.tools.synthesize import LINKAGE_RULE
+from llm import Budget, ScriptedModel
 from compiler import compile as compile_run
 from sdk.errors import ValidationError
 from sdk.target_path import check_target_path, distance_to_path
@@ -302,7 +304,40 @@ def test_the_tool_is_offered_only_in_prompt_set_v2() -> None:
     lines = v2.splitlines()
     at = next(i for i, line in enumerate(lines) if line.startswith("- `testing.md`"))
     assert lines[at + 1].startswith("- `synthesis.md`")
-    assert v2.replace(lines[at + 1] + "\n", "") == v1
+    workflow = lines.index("## Workflow")
+    assert lines[workflow + 2].startswith("**Linkages** (four-bar, slider-crank, scissor")
+    assert LINKAGE_RULE.count("\n") <= 2 and "target_path" in LINKAGE_RULE
+    assert v2.replace(lines[at + 1] + "\n", "").replace(LINKAGE_RULE + "\n\n", "") == v1
+
+
+def test_the_run_record_counts_synthesize_calls_and_the_final_target_path(tmp_path) -> None:
+    _model, spec = four_bar_target()
+    spec.pop("_values")
+    main = ("from examples.four_bar import build\n\nobject_model = build()\n"
+            f"target_path = {json.dumps(spec)}\n")
+    same = {"points": [[0, 0, 0]] * 3}
+    replies = [{"tool_calls": [{"name": "synthesize", "arguments": {
+                   "mechanism": "four_bar", "target": same}}]},
+               {"tool_calls": [{"name": "write", "arguments": {"path": "main.py",
+                                                               "content": main}}]},
+               {"tool_calls": [{"name": "compile", "arguments": {}}]},
+               "Done: a four-bar whose coupler point follows the target."]
+    budget = Budget(max_cost_usd=None, max_calls=None)
+    result = run("a four-bar", ScriptedModel(replies, budget=budget), budget,
+                 run_dir=tmp_path / "v2", prompt_set="v2")
+    record = json.loads((result.run_dir / "record.json").read_text(encoding="utf-8"))
+    synthesis = record["synthesis"]
+    assert synthesis["count"] == 1 and synthesis["calls"][0]["outcome"] == "solver_error"
+    assert synthesis["calls"][0]["wall_s"] > 0 and synthesis["final_build"] == "v0000"
+    assert synthesis["final_declared_target_path"] is True
+    assert synthesis["final_target_path"]["passed"] is True
+    # Prompt set v1 does not offer the tool (the scripted model refuses the call, as a real
+    # provider would reject an undeclared tool), and nothing is solved.
+    v1 = run("a four-bar", ScriptedModel(replies, budget=budget), budget,
+             run_dir=tmp_path / "v1", prompt_set="v1")
+    assert "not one of the tools offered" in v1.reason
+    record = json.loads((v1.run_dir / "record.json").read_text(encoding="utf-8"))
+    assert record["synthesis"]["count"] == 0
 
 
 @pytest.fixture()

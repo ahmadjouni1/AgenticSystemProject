@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Written for the replica (not the teammate's file): a spatial 3R arm, base yaw (z), shoulder
+     and elbow pitch (y). Drawn at the initial design: shoulder height 0.30 m, upper arm 0.35 m,
+     forearm 0.40 m. examples/spatial_3r.json moves the joint origins from there. -->
+<robot name="spatial_3r">
+  <link name="base_link"/>
+  <link name="turntable"/>
+  <link name="upper_arm"/>
+  <link name="forearm"/>
+  <link name="tool"/>
+  <joint name="base_yaw" type="revolute">
+    <parent link="base_link"/>
+    <child link="turntable"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.1416" upper="3.1416" effort="10" velocity="1"/>
+  </joint>
+  <joint name="shoulder" type="revolute">
+    <parent link="turntable"/>
+    <child link="upper_arm"/>
+    <origin xyz="0 0 0.30" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5708" upper="1.5708" effort="10" velocity="1"/>
+  </joint>
+  <joint name="elbow" type="revolute">
+    <parent link="upper_arm"/>
+    <child link="forearm"/>
+    <origin xyz="0.35 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.5" upper="2.5" effort="10" velocity="1"/>
+  </joint>
+  <joint name="tool_mount" type="fixed">
+    <parent link="forearm"/>
+    <child link="tool"/>
+    <origin xyz="0.40 0 0" rpy="0 0 0"/>
+  </joint>
+</robot>

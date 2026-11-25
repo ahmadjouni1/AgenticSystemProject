@@ -142,6 +142,12 @@ Two possible routes to run our checks later, each needing a decision first:
 - **Different effort and a stricter outside time stop** both work against Articraft; an
   equal-effort run would pass `--effort` differently. The table above lists every
   difference, so a reader can weigh them.
+- **Articraft had two extra tools.** The WSL copy includes our teammate's last two commits
+  (2026-11-23), which add `synthesize_trajectory` and `synthesize_planar_mechanism` to
+  Articraft's tool list and system prompt. None of the 13 baseline runs called them
+  (checked in every `conversation.jsonl`). The wipers run considered the planar tool and
+  dropped it, because the prompt gives no target path. So the baseline is Articraft with
+  those tools available but unused.
 - **The success rules differ.** Articraft's success is a fresh compile that passed its own
   checks, followed by a text reply. Ours is the same rule with our checks. Neither system's
   checks are run on the other's output.

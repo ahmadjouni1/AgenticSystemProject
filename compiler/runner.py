@@ -157,6 +157,10 @@ def compile(run_dir: str | os.PathLike[str], timeout: float = DEFAULT_TIMEOUT, *
         summary = (f"Compile passed: exported v{export['version']:04d} "
                    f"(bodies={model.get('bodies')}, joints={model.get('joints')}, "
                    f"closures={model.get('closures')}, mimics={model.get('mimics')}).")
+        path = model.get("target_path")
+        if path:
+            summary += (f" target_path: max error {path['max_error_mm']} mm, RMS "
+                        f"{path['rms_error_mm']} mm (tolerance {path['tolerance_mm']:.3g} mm).")
     result = CompileResult(
         status=status,
         signals_text=feedback.render_signals(status, signals, success_summary=summary,
@@ -178,6 +182,7 @@ def compile(run_dir: str | os.PathLike[str], timeout: float = DEFAULT_TIMEOUT, *
         "startup": result.startup, "phase": result.phase, "phases": phases,
         "returncode": run["returncode"], "timed_out": run["timed_out"],
         "signals": [s.to_dict() for s in signals], "export": export or None,
+        "target_path": (payload.get("model") or {}).get("target_path"),
         "stdout": payload.get("stdout", ""), "stderr": payload.get("stderr", ""),
         "traceback": payload.get("traceback", ""), "worker_stdout": run["stray_stdout"],
         "worker_stderr": run["stderr"], "hang_dump": run.get("hang_dump", ""),

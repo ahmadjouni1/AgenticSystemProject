@@ -22,14 +22,17 @@ from agent.tools.core import (MAX_OUTPUT_CHARS, AgentTool, ToolContext, ToolErro
 from agent.tools.files import EDIT, READ, WRITE
 from agent.tools.probe import PROBE
 from agent.tools.render import RENDER
+from agent.tools.synthesize import SYNTHESIZE
 
 TOOLS: tuple[AgentTool, ...] = (READ, WRITE, EDIT, COMPILE, RENDER, PROBE)
-BY_NAME = {tool.name: tool for tool in TOOLS}
+SYNTHESIS_TOOLS: tuple[AgentTool, ...] = (*TOOLS, SYNTHESIZE)  # prompt set "v2" (step 13)
+BY_NAME = {tool.name: tool for tool in SYNTHESIS_TOOLS}
 
 
-def schemas() -> list[llm.Tool]:
-    """The tool schemas, always in this order: read, write, edit, compile, render, probe."""
-    return [tool.schema() for tool in TOOLS]
+def schemas(synthesis: bool = False) -> list[llm.Tool]:
+    """The tool schemas, always in this order: read, write, edit, compile, render, probe, and
+    synthesize when ``synthesis`` is on."""
+    return [tool.schema() for tool in (SYNTHESIS_TOOLS if synthesis else TOOLS)]
 
 
 def schema_size() -> dict[str, int]:

@@ -1,0 +1,125 @@
+{
+  "_comment": "Written for the replica, not the teammate's file. Waypoints are the tool tip of the same arm at shoulder height 0.28 m, upper arm 0.42 m, forearm 0.33 m, so that design is a known answer (error 0). The URDF is drawn at 0.30 / 0.35 / 0.40 m.",
+  "urdf": "spatial_3r.urdf",
+  "base_link": "base_link",
+  "tip_link": "tool",
+  "design_parameters": [
+    {
+      "name": "shoulder_height_m",
+      "initial": 0.3,
+      "lower": 0.15,
+      "upper": 0.45,
+      "bindings": [
+        {
+          "joint": "shoulder",
+          "xyz": [
+            0,
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "name": "upper_arm_length_m",
+      "initial": 0.35,
+      "lower": 0.2,
+      "upper": 0.6,
+      "bindings": [
+        {
+          "joint": "elbow",
+          "xyz": [
+            1,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "forearm_length_m",
+      "initial": 0.4,
+      "lower": 0.2,
+      "upper": 0.6,
+      "bindings": [
+        {
+          "joint": "tool_mount",
+          "xyz": [
+            1,
+            0,
+            0
+          ]
+        }
+      ]
+    }
+  ],
+  "waypoints": {
+    "positions_m": [
+      [
+        0.702220023,
+        0.142347046,
+        0.306596819
+      ],
+      [
+        0.683927529,
+        0.211563577,
+        0.18458624
+      ],
+      [
+        0.644849793,
+        0.272638119,
+        0.084032945
+      ],
+      [
+        0.600811902,
+        0.328225038,
+        0.022711602
+      ],
+      [
+        0.564520247,
+        0.38620908,
+        0.010226865
+      ],
+      [
+        0.537070298,
+        0.452368072,
+        0.050625332
+      ],
+      [
+        0.50789001,
+        0.522943137,
+        0.14326124
+      ],
+      [
+        0.462622184,
+        0.582977146,
+        0.27905911
+      ],
+      [
+        0.394200618,
+        0.613931088,
+        0.437063514
+      ]
+    ]
+  },
+  "q_start": [
+    0.2,
+    -0.3,
+    0.6
+  ],
+  "q_end": [
+    1.0,
+    -0.3,
+    0.2
+  ],
+  "max_joint_step": [
+    0.25,
+    0.25,
+    0.25
+  ],
+  "position_tolerance_m": 0.002,
+  "length_scale_m": 0.5,
+  "settings": {
+    "outer_maxeval": 500
+  }
+}

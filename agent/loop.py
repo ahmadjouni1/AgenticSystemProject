@@ -52,7 +52,7 @@ import traceback
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ from agent import lessons as lessons_file
 from agent import storage
 from agent.context import ContextPolicy, checkpoint_text
 from agent.tools import BY_NAME, ToolContext, ToolOutput, run_tool, schemas
+from agent.tools.synthesize import SYSTEM_LINE as SYNTHESIS_LINE
 from compiler import compile as compile_run
 from compiler import workspace_digest
 from compiler.feedback import failure_signature
@@ -84,6 +85,19 @@ class PromptSet:
     quickstart: Path
     docs_dir: Path
     task: str  # formatted with {prompt}
+    synthesis: bool = False
+    """Step 13: offer the synthesize tool, and list docs/sdk/synthesis.md in the system prompt
+    (one line after the testing.md line)."""
+
+    def system_text(self) -> str:
+        text = self.system.read_text(encoding="utf-8")
+        if not self.synthesis:
+            return text
+        lines = text.splitlines(keepends=True)
+        at = next(i for i, line in enumerate(lines) if line.startswith("- `testing.md`"))
+        while at + 1 < len(lines) and lines[at + 1].startswith("  "):  # wrapped bullet
+            at += 1
+        return "".join([*lines[:at + 1], SYNTHESIS_LINE + "\n", *lines[at + 1:]])
 
 
 PROMPT_SETS = {
@@ -99,6 +113,8 @@ PROMPT_SETS = {
                     "a short plan (at most about 15 lines) in your reply, then call write with "
                     "the whole main.py in the same reply."),
 }
+# Step 13: v1 plus the synthesize tool and one system-prompt line about it.
+PROMPT_SETS["v2"] = replace(PROMPT_SETS["v1"], name="v2", synthesis=True)
 DEFAULT_PROMPT_SET = "v1"
 TEMPLATE = REPLICA_ROOT / "prompts" / "main_template.py"
 RUNS_ROOT = REPLICA_ROOT / "runs"
@@ -288,7 +304,7 @@ class _Run:
         self.on_event = on_event or (lambda event: None)
         self.files = _Files(run_dir)
         self.ctx = ToolContext(run_dir, compiler=compiler, docs_dir=prompt_set.docs_dir)
-        self.tools = schemas()
+        self.tools = schemas(synthesis=prompt_set.synthesis)
         self.tools_chars = len(json.dumps(tools_to_chat(self.tools), ensure_ascii=False))
         self.messages: list[Message] = []
         self.turn_of: list[int] = []  # the turn each message was added in
@@ -563,6 +579,8 @@ class _Run:
             note = self.context.doc_note(call.arguments.get("path"))
             if note is not None:  # rule c: a doc that is already in the context
                 return ToolOutput("read", note, json.dumps(note), [], False)
+        if call.name not in {tool.name for tool in self.tools}:  # synthesize off: unknown
+            return run_tool(self.ctx, f"{call.name} (not offered)", call.arguments)
         return run_tool(self.ctx, call.name, call.arguments)
 
     def after_compile(self) -> dict[str, Any]:
@@ -720,7 +738,7 @@ class _Run:
             self.add(User(resumed_message(previous["status"], previous.get("reason", ""),
                                           allowance)), reminder="resumed")
             return
-        system = self.prompt_set.system.read_text(encoding="utf-8")
+        system = self.prompt_set.system_text()
         if self.lessons:
             system += lessons_file.prompt_section()
         self.add(System(system))

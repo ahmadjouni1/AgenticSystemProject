@@ -1,0 +1,37 @@
+{
+ "name": "synthesis_v1",
+ "_comment": "Step 13 re-test of the synthesize tool (prompt set v2): benchmark_v1's three closed-loop prompts plus step 10's crank-slider pump, the closed loops our builder fails most. Compare with eval_v1 (scissor lift, wipers, pantograph) and step 10b B2 (pump), both prompt set v1.",
+ "categories": {
+  "loop": "closed loops"
+ },
+ "prompts": [
+  {
+   "id": "scissor_lift",
+   "category": "loop",
+   "object": "scissor lift",
+   "prompt": "a scissor lift: a platform raised by crossed arms",
+   "motion": "each pair of crossed arms pivots at its middle; one end of each arm slides in a track as the platform rises and stays level (closed loops with sliding joints)"
+  },
+  {
+   "id": "windshield_wipers",
+   "category": "loop",
+   "object": "windshield wipers",
+   "prompt": "a pair of car windshield wipers driven by one motor",
+   "motion": "a motor crank drives a rod or rods that swing both wiper arms back and forth together about their pivots (crank-rocker loops); the two wipers move in step"
+  },
+  {
+   "id": "pantograph",
+   "category": "loop",
+   "object": "pantograph drawing copier",
+   "prompt": "a pantograph drawing copier: a linked parallelogram that copies a drawing at a larger scale",
+   "motion": "the bars form a parallelogram on one fixed pivot; moving the tracing point moves the pen point by a fixed scale factor, and the parallelogram stays closed in every pose"
+  },
+  {
+   "id": "crank_slider_pump",
+   "category": "loop",
+   "object": "crank-slider pump",
+   "prompt": "a crank-slider pump (crank, connecting rod, piston in a cylinder)",
+   "motion": "the crank turns a full circle; the connecting rod drives the piston back and forth in the cylinder"
+  }
+ ]
+}

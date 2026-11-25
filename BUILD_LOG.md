@@ -3067,3 +3067,73 @@ report is `runs/eval_articraft_v1/report.md`.
     overstate them by about $0.03 each, or the balance still lags a little.
   - **The budget plan:** the baseline stayed within its $3.
   - **Left:** $3.99, against the planned solver re-test ($2) and the margin.
+
+## Step 13: Dimensional synthesis (the teammate's solver as a tool)
+
+Built and tested with no live API runs (2026-11-25). The balance is still $3.99.
+
+### What was built
+
+| # | What | Files |
+| --- | --- | --- |
+| 1 | **The teammate's solver, copied unmodified.** `synthesis.py` and `README.md` from `Previous work/Agentic_Systems_Project/Project_extra_tools/` (commit `03f4c6c`), with attribution in the folder and in NOTICE. A test checks that both are byte-identical to the originals (SHA-256). That folder holds only those two files: the README's `examples/spatial_3r.json` and 8 tests were never committed, so the example (a spatial 3R arm with a known answer) and the solver tests were written here, after the README's description | `solvers/nested/` |
+| 2 | **The plug-in interface:** `solve(target, constraints) -> SolverResult{parameters, trajectory, error {max, rms}, feasible, message, details}`. The target is checked as plain JSON data (points, tolerance) and never executed; Articraft's port accepts Python code for the target curve. `solve_isolated` runs each solve in a fresh `python -m solvers.worker` process, with the request on stdin and the result on stdout. It kills the process at the timeout (`Popen.kill`: TerminateProcess on Windows, SIGKILL elsewhere), and strips key/token variables from its environment | `solvers/base.py`, `solvers/worker.py` |
+| 3 | **How we run it** (`Synthesis`, a subclass that changes none of the teammate's maths): a deadline; a stop once a feasible design is within a tenth of the tolerance; then a **polish**, one SLSQP solve over the design and the joint path together, in the same minimax form with the same margins. See "Finding" below | `solvers/search.py` |
+| 4 | **Plug-in A, serial arms:** the teammate's `SerialURDF` on URDF text. Takes an optional tip point (added as a fixed link), endpoints from inverse kinematics when not given, and `max_evaluations` (= `outer_maxeval`, default 500) | `solvers/serial_arm.py` |
+| 5 | **Plug-in B, closed loops (experimental):** a four-bar and a slider-crank. The design vector builds a real replica `Assembly` (closed at q = 0 with `frame_in`), and our loop solver poses it with the walking warm start. It goes into the teammate's custom-model interface (`fk(design, q)`). Each new design is posed every 5 degrees over the crank span and `fk` interpolates that curve; a crank angle where the loop cannot close, or flips branch, ends the curve, and `extra_margins` makes points beyond it infeasible. The final design is re-posed directly at every solved angle, and those poses give the reported error. Planes xy/xz/yz; `output: "slider"` tracks the slider pin | `solvers/planar.py` |
+| 6 | **Agent tool `synthesize(mechanism, target, constraints)`:** returns the dimensions, the predicted path, max/RMS error, `within_tolerance`, and what to build: `rest_points` (every pivot and pin at q = 0, world coordinates) for linkages, or `joint_origins` (new `parent.at(xyz, rpy)`) for arms. The arm plug-in reads the newest build's URDF and converts body frames to link frames and back. Errors are structured (`bad_arguments`, `solver_error`, `solver_timeout`, `no_build`). Each result is saved to `synthesis/NN-<mechanism>.json` | `agent/tools/synthesize.py`, `agent/tools/__init__.py` |
+| 7 | **Prompt set `v2`** = v1 + the tool + one system-prompt line pointing to `docs/sdk/synthesis.md` (1.1k tokens by the docs test's conservative count; at most 1.5k). v1, the eval_v1 setup, is unchanged: same six tools, same text. A call to a tool not offered is an unknown tool | `agent/loop.py`, `docs/sdk/synthesis.md` |
+| 8 | **The trajectory check:** `target_path = {body, point, joint, points, tolerance}` next to `object_model`. The compiler drives the joint over its range in 361 steps, traces the output point, and blocks when the max (or RMS) distance to the target exceeds the tolerance. The message names the worst point and the driver value, plus a hint naming the tool; a pass is reported in the compile summary. Optional `values` compares point by point | `sdk/target_path.py`, `compiler/worker.py`, `compiler/feedback.py`, `compiler/runner.py` |
+| 9 | **Re-test benchmark** (not run): the three loop prompts of benchmark_v1 plus step 10's crank-slider pump | `prompts/benchmark_synthesis.json` |
+
+### Finding: the teammate's outer search stalls near the answer
+
+- **What happens:** on the spatial 3R example, from every start tried, the outer COBYLA search stops 12-17 mm from the known design ("trust region radius reaches its lower bound").
+- **Why:** there several waypoint errors are equal, so the maximum has a corner. A step along any single design axis raises it (measured), and only a narrow combined direction lowers it. Along the straight line to the known design the error falls smoothly to 0. Restarting COBYLA and relaxing its constraint did not help.
+- **The fix in our wrapper:** the polish, from the nested result, reaches the known design (error < 1e-6 m) in 1-2 s from all four starts tried. Results report both errors.
+
+### Solve times and accuracy (`scripts/synthesis_bench.py`, known answers, in process)
+
+| Mechanism | Start | Max error | RMS | Within tolerance (1-2 mm) | Lengths vs known | Search evaluations | Error after search | Seconds | Per pose |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| serial arm | spatial 3R, the example's start | 0.116 mm | 0.055 mm | yes | within 0.004% | 36 | 13.1 mm | 2 | - |
+| serial arm | spatial 3R, endpoints by IK | 0.0001 mm | 0.0001 mm | yes | - | 1 | 0.0001 mm | 1 | - |
+| four-bar | 8% off the known lengths | 0.098 mm | 0.049 mm | yes | within 8.3% | 83 | 8.2 mm | 76 | 2.0 ms |
+| four-bar | default start (target only) | 0.16 mm | 0.16 mm | yes | - | 68 | 10 mm | 118 | 2.0 ms |
+| slider-crank | 8% off the known lengths | 0.097 mm | 0.067 mm | yes | within 5.6% | 81 | 2.8 mm | 37 | 1.9 ms |
+| slider-crank | default start (target only) | 0.072 mm | 0.055 mm | yes | - | 88 | 5.0 mm | 77 | 1.9 ms |
+
+- **Arms are fast** (1-2 s). With endpoints from IK, the initial design already follows the path: a 3-joint arm needs no dimension change for this target, so the fixed endpoints are what pin the design.
+- **Linkages take 37-118 s.** One pose costs about 2 ms, and one design about 0.15 s (73 poses). Most of the time is the polish, whose finite differences need a new crank sweep per free parameter. The default limit is 100 s per call (at most 240). A fresh solver process adds about 1.2 s.
+- **Paths, not unique dimensions.** The search stops within a tenth of the tolerance. Several nearby linkages trace the path that well, so the lengths land 1-8% from the known ones while the path is reproduced. From the default start the four-bar found a different linkage (crank 20 mm, rocker 161 mm) that traces the same path to 0.16 mm.
+
+### Tests (35 new, no network)
+
+- **`tests/test_solvers.py` (34):**
+  - The teammate's files are unmodified.
+  - The solver after its README: a custom model, exact endpoints, a graded infeasible result, repeatability, unconnectable endpoints, URDF FK against a hand computation, URDF export/reload, and the 3R stall plus polish.
+  - Data-only targets, the subprocess timeout (killed within seconds), plug-in A on the example (given and IK endpoints, `max_evaluations` honoured).
+  - Plug-in B recovers a recorded four-bar and slider-crank path (an independent re-check through the trajectory check), slider output, reach detection.
+  - The tool: offered in v2 only, structured errors, a linkage result and its saved file, and an arm sized from a compiled build with frame conversion.
+  - The trajectory check passing, failing (4 mm off-plane), RMS tolerance, declaration errors, and compile passing or blocking on `target_path`.
+- **`tests/test_docs.py` (+1):** the synthesis page is at most 1.5k tokens; v1 does not list it, v2 does.
+
+### The Articraft baseline had the teammate's tools
+
+The WSL copy included the teammate's two synthesis tools (Articraft commits `03f4c6c`, `eab84bf`). None of the 13 baseline runs called them. The wipers run considered the planar one and dropped it, since the prompt gives no target path. Noted in `docs/ARTICRAFT_BASELINE.md`.
+
+### Re-test estimate (closed-loop prompts, 2 runs each, prompt set v2): not run
+
+| Prompt | Runs so far (prompt set v1, off-peak) | Mean cost per run | Success |
+| --- | --- | --- | --- |
+| scissor lift | eval_v1, 3 | $0.259 | 0/3 |
+| windshield wipers | eval_v1, 3 | $0.200 | 2/3 |
+| pantograph | eval_v1, 2 | $0.254 | 1/2 |
+| crank-slider pump | step 10b B2, 3 | $0.258 | 1/3 |
+
+- **Expected:** 8 runs x about $0.24, plus about $0.02-0.05 per run for the tool. The schema, the docs page and the synthesize results add a few thousand tokens and a few turns, mostly cached. So about $2.0-2.3 if all 8 ran. These prompts mostly run to the $0.30 cap or the 25-minute limit, so the cap, not the tool, sets the cost.
+- **Under a $2 budget:** with `--max-total 2` a run starts only while spent + $0.30 fits, so about 7 of the 8 runs start and the 8th only if the first 7 are cheap. The total stays at $2.00 plus at most one reply past the cap per run in flight (eval_v1's largest run was $0.32). All 8 for sure needs about $2.40.
+- **Time:** each linkage solve takes 0.5-2 minutes of the run's 25.
+- **Command** (off-peak, after 10:00 UTC on weekdays):
+  `uv run python scripts/eval.py --name synth_v1 --runs 2 --jobs 2 --benchmark prompts/benchmark_synthesis.json --max-total 2 --off-peak-only --agent-args "--prompt-set v2"`
+- **A risk for the result:** none of these prompts states a target path. The model has to choose one itself (a wiper arc, a piston stroke, a lift height), as Articraft's runs did not.

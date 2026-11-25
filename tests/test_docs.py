@@ -34,7 +34,7 @@ ALLOWED_EVAL_OBJECTS = {
     "four_bar": "step 10 asked for four-bar authoring with frame_in in joints_and_loops.md; "
                 "the four-bar was an evaluation prompt in steps 8-9 only",
 }
-TOOLS = {"read", "write", "edit", "compile", "render", "probe"}
+TOOLS = {"read", "write", "edit", "compile", "render", "probe", "synthesize"}
 
 
 CHARS_PER_TOKEN = 2.9
@@ -78,12 +78,19 @@ def test_each_docs_page_is_at_most_2k_tokens(page: Path) -> None:
 
 
 def test_the_system_prompt_lists_every_docs_page_and_says_the_quickstart_is_in_context() -> None:
-    text = SYSTEM.read_text(encoding="utf-8")
     on_demand = {p.name for p in PAGES} - {"README.md", "quickstart.md"}
-    assert on_demand == {"shapes.md", "joints_and_loops.md", "testing.md"}
-    for name in on_demand:
-        assert re.search(rf"^- `{re.escape(name)}`: .+", text, re.M), name  # one line each
-    assert "already in your context" in text and "never read" in text
+    assert on_demand == {"shapes.md", "joints_and_loops.md", "testing.md", "synthesis.md"}
+    for prompt_set, pages in (("v1", on_demand - {"synthesis.md"}), ("v2", on_demand)):
+        text = PROMPT_SETS[prompt_set].system_text()
+        for name in on_demand:  # one line each, and synthesis.md only with the tool (v2)
+            listed = re.search(rf"^- `{re.escape(name)}`: .+", text, re.M) is not None
+            assert listed == (name in pages), (prompt_set, name)
+        assert "already in your context" in text and "never read" in text
+
+
+def test_the_synthesis_page_is_at_most_1500_tokens() -> None:
+    assert tokens((DOCS / "synthesis.md").read_text(encoding="utf-8")) <= 1500
+    assert tokens(PROMPT_SETS["v2"].system_text()) <= MAX_TOKENS
 
 
 def test_the_docs_use_only_python_and_text_blocks() -> None:

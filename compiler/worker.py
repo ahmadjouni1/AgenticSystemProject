@@ -12,6 +12,7 @@ The phases are:
 4. run ``run_tests(ctx)`` if it is defined (``ctx`` is an ``sdk.testing.TestContext``:
    expectations and ``allow_*`` with reasons);
 5. baseline checks (``sdk.testing.run_checks``), using the allowances from ``ctx``;
+   then, if main.py declares ``target_path``, the trajectory check (``sdk.target_path``);
 6. export to ``result/vNNNN`` with ``main.py`` as the source snapshot and the signals
    in ``signals.json``, but only if nothing blocks. A valid model whose checks fail is
    exported to ``result/last_failed`` instead (not a version), for the viewer.
@@ -222,6 +223,13 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
     with progress.phase_named(feedback.CHECKS_PHASE):
         report = run_checks(model, ctx)
     signals += feedback.signals_from_report(report, workspace)
+    target = namespace.get("target_path")
+    if target is not None:  # step 13: the output point must follow the declared path
+        from sdk.target_path import check_target_path
+
+        with progress.phase_named(feedback.TARGET_PHASE):
+            findings, model_info["target_path"] = check_target_path(model, target)
+        signals += feedback.signals_from_report(_Findings(findings), workspace)
     signals += notice_signals(workspace)  # helpers called in run_tests() or later
     model_info["check_seconds"] = round(sum(report.timings.values()), 4)
     signals_json = json.dumps([s.to_dict() for s in signals], indent=2)
@@ -235,6 +243,11 @@ def _run_phases(workspace: Path, result_dir: Path, main_path: Path, progress: Pr
                    "urdf": str(result.urdf), "glb": str(result.glb),
                    "manifest": str(result.manifest)}
     return signals, export_info, model_info
+
+
+@dataclasses.dataclass
+class _Findings:
+    findings: list
 
 
 def _export_last_failed(model: Any, result_dir: Path, main_path: Path, signals_json: str) -> None:

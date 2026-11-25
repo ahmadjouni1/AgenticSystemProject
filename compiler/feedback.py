@@ -27,6 +27,7 @@ from pathlib import Path
 MAIN = "main.py"
 TESTS_PHASE = "running run_tests()"
 CHECKS_PHASE = "running baseline checks"
+TARGET_PHASE = "checking target_path"
 EXPORT_PHASE = "exporting"
 
 Where = tuple[str, int]
@@ -56,6 +57,8 @@ class SignalKind(StrEnum):
     ALLOWANCE = "allowance"
     # A shape helper repaired an argument instead of failing (step 10b; a warning).
     HELPER_ADJUSTED = "helper_adjusted"
+    # main.py declares target_path and the output point misses it (step 13).
+    TARGET_PATH = "target_path"
 
 
 @dataclass(frozen=True)
@@ -206,9 +209,12 @@ HINTS = {
     SignalKind.ALLOWANCE: "Remove the allowance; nothing needs it.",
     SignalKind.HELPER_ADJUSTED: "A shape helper changed an argument to build the shape; pass a "
                                 "valid value to choose it yourself.",
+    SignalKind.TARGET_PATH: "Use the dimensions the synthesize tool gives (pivots, link lengths, "
+                            "output point) or fix target_path's body, point or joint.",
 }
 
 _CHECK_KINDS = {
+    "target_path": SignalKind.TARGET_PATH,
     "authored": SignalKind.TEST_FAILURE, "overlap": SignalKind.OVERLAP,
     "floating": SignalKind.FLOATING, "swept_collision": SignalKind.SWEPT_COLLISION,
     "combined_collision": SignalKind.SWEPT_COLLISION,

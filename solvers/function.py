@@ -314,6 +314,7 @@ def _verify(plugin, target: FunctionTarget, params: dict[str, float], span: floa
         message=result_message,
         details={"tolerance": target.tolerance, "kind": target.kind, "unit": unit,
                  "output_joint": OUTPUT_JOINT[name], "crank_span": span, "plane": plane,
+                 "height": height,
                  "derived": derived, "rest_points": rest_points(assembly, model, params),
                  "fit": message, "evaluations": count["evaluations"],
                  "geometry_evaluations": count["evaluations"],

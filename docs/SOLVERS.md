@@ -91,6 +91,17 @@ at q = 0 with `frame_in`) and posed by our loop solver, with its walking warm st
 - **The check:** the final design is posed again every degree.
 - **Cost:** 1-5 s per solve.
 
+## The skeleton (`solvers/skeleton.py`)
+
+For a four-bar or slider-crank, the tool also returns a complete `main.py`:
+
+- **What it holds:** simple bars at the solved pivots, the loop closed with `frame_in`, and
+  `target_path` declared.
+- **Layers:** the links are stacked so that joined links touch and the others never meet.
+- **Checked first:** the tool compiles it before answering.
+
+It exists because synth_v2's runs got correct numbers and still never wrote a build.
+
 ## The compile check (`sdk/target_path.py`)
 
 `main.py` may declare `target_path`: a point path, or a sweep, stroke or function of an

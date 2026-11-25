@@ -32,6 +32,7 @@ from sdk.frames import Frame
 from sdk.transforms import invert
 from solvers.base import (SolverError, SolverResult, SolverTimeout, Unsupported,
                           check_supported, solve_isolated)
+from solvers.skeleton import SkeletonError, skeleton_source
 
 MECHANISMS = ("four_bar", "slider_crank", "serial_arm")
 DEFAULT_TIME_LIMIT_S = 180.0  # the solve's own limit; it then returns its best design
@@ -40,9 +41,9 @@ STARTUP_S = 60.0  # the solver process starts, imports, and verifies the final d
 MAX_PATH_POINTS = 40
 SYSTEM_LINE = ("- `synthesis.md`: the `synthesize` tool (four-bar and slider-crank dimensions "
                "from a sweep, stroke or path) and `target_path`, which makes compile check it.")
-LINKAGE_RULE = ("**Linkages:** call `synthesize` only for four-bars and slider-cranks (wipers, "
-                "pumps, crank-rockers):\npick the sweep, stroke or path, then build and declare "
-                "`target_path`. Design other linkages normally.")
+LINKAGE_RULE = ("**Linkages:** for four-bars and slider-cranks only (wipers, pumps): pick the "
+                "sweep, stroke or path, call\n`synthesize`, write its skeleton as main.py, "
+                "compile, then add detail in small edits. Others: as usual.")
 
 
 def _frames(build) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -209,7 +210,32 @@ def _synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                            "turns from 0 to crank_span), then declare target_path so compile "
                            "checks the path.")
     out["saved"] = _save(ctx, mechanism, constraints, result)
+    if mechanism != "serial_arm":
+        out.update(_skeleton(ctx, mechanism, result, target, out["saved"]))
     return out
+
+
+def _skeleton(ctx: ToolContext, mechanism: str, result: SolverResult, target: dict[str, Any],
+              saved: str) -> dict[str, Any]:
+    """The skeleton main.py for this design, compiled once in its own folder (never the
+    workspace) so the answer says whether it passes every check as it is."""
+    try:
+        source = skeleton_source(mechanism, result, target)
+    except SkeletonError as exc:
+        return {"skeleton_main_py": None, "skeleton_compile": f"no skeleton: {exc}"}
+    folder = ctx.run_dir / saved.replace(".json", "-skeleton")
+    (folder / "workspace").mkdir(parents=True, exist_ok=True)
+    (folder / "workspace" / "main.py").write_text(source, encoding="utf-8")
+    compiled = ctx.compiler(folder)
+    if compiled.ok:
+        verdict = "passed every check, target_path included"
+    else:
+        first = next((s for s in compiled.signals if s.severity == "failure"), None)
+        verdict = f"failed: {first.kind}: {first.message}" if first else "failed"
+    return {"skeleton_main_py": source, "skeleton_compile": verdict,
+            "next": ("write skeleton_main_py as main.py and compile it; then add detail in "
+                     "small edits (keep the pivots, lengths, joint names and target_path), "
+                     "compiling after each")}
 
 
 def _function_target_path(target: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:

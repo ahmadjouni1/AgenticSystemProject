@@ -24,8 +24,9 @@ RUNS = ROOT / "runs"
 PROMPTS = {"scissor_lift": "scissor lift", "windshield_wipers": "windshield wipers",
            "pantograph": "pantograph", "crank_slider_pump": "crank-slider pump"}
 SETUPS = {"without": "no tool (v1)", "synth_v1": "synth_v1 (mismatched)",
-          "synth_v2": "synth_v2 (fixed)"}
-OUT = RUNS / "eval_synth_v2" / "synthesis_report.md"
+          "synth_v2": "synth_v2 (fixed)", "synth_v3": "synth_v3 (skeleton)"}
+OUT = RUNS / "eval_synth_v3" / "synthesis_report.md"
+TOOL_PROMPTS = ("windshield_wipers", "crank_slider_pump")
 
 
 def read(path: Path) -> dict:
@@ -119,6 +120,10 @@ def main() -> int:
     for setup, label in SETUPS.items():
         found, cut = totals[setup]
         lines.append(row(f"**all four, {label}**", found, cut, setup != "without"))
+    for setup, label in SETUPS.items():  # the two prompts the tool fits (synth_v3 runs only these)
+        pairs = [records(setup, prompt) for prompt in TOOL_PROMPTS]
+        lines.append(row(f"**wipers + pump, {label}**", [r for found, _ in pairs for r in found],
+                         sum(cut for _, cut in pairs), setup != "without"))
     lines += ["", "## Runs with the tool", "",
               "| Setup | Prompt | Status | Cost | Time | synthesize calls | Solve time | "
               "Final build declares target_path | Trajectory check |",

@@ -3195,3 +3195,55 @@ Prompt set v2 as committed in `16ee664`, 4 closed-loop prompts x 2 runs, `--jobs
 | a 60 mm stroke; a known slider-crank's travel at 12 crank angles | within 0.5 mm; crank within 5% of the known 25 mm | 3.9 s for both |
 
 **Tests:** 15 new in `tests/test_solvers.py` (function targets checked as data, mismatched target kinds, `unsupported` answered at once, the four recoveries above, the tool's sweep answer with a ready `target_path`, the function check passing, failing and rejecting the wrong kind, and compile blocking a missed sweep). The `hexapod` and rule tests were updated.
+
+### Re-test synth_v2 (2026-11-25, 11:41-13:10 UTC, off-peak): the tool works, the builds never start
+
+**The run:** prompt set v2 with the fixes (`7d36b1e`), 4 closed-loop prompts x 2 runs, `--jobs 2`.
+
+**The cap: $2.20, not the $2.30 asked.** The balance was $3.21 at the start, and two runs in flight can each go a reply past the cap. $2.30 could have cut into the $0.90 to keep.
+
+**Stopped after 6 of 8 runs.** As asked, eval.py was stopped (only eval.py, so the two runs in flight finished) before pantograph r2 and pump r2 started.
+
+**Spend:** $1.13 tracked. The balance went $3.21 → $2.10 ($1.11).
+
+| Run | End | Cost | Compiles | Cut-off replies | synthesize |
+| --- | --- | --- | --- | --- | --- |
+| scissor lift r1 | no progress | $0.217 | 3 (validation, validation, overlap) | 2 | not called (correct: not a four-bar) |
+| scissor lift r2 | no progress, no build | $0.172 | 0 | 2 | not called |
+| windshield wipers r1 | time limit, no build | $0.208 | 0 | 4 | `four_bar` sweep, within tolerance, 8 s |
+| windshield wipers r2 | no progress, no build | $0.193 | 0 | 2 | `four_bar` sweep, within tolerance, 13 s |
+| pantograph r1 | no progress, no build | $0.170 | 0 | 2 | not called (correct) |
+| crank-slider pump r1 | no progress, no build | $0.171 | 0 | 2 | `slider_crank` stroke, within 0.0001 mm, 4 s |
+
+**What it showed:**
+- **The fixes worked as tools.**
+  - The model used the tool exactly where the rule said: wipers and pump yes, scissor lift and pantograph no.
+  - Every call returned a design within tolerance in 4-13 s.
+- **But 0/6 succeeded, and 5 runs never wrote main.py.** After the tool answered, each run spent 2-4 replies of 32k reasoning tokens planning the build, and was cut off.
+  - Median reasoning before the first compile: 81k tokens, against 39k without the tool.
+  - Having the numbers did not shorten the planning. The model still worked out the whole object (two wipers on one motor, a piston in a cylinder) in its head before writing anything.
+- **Without the tool these prompts went 4/11** (eval_v1 and step 10b B2). The difference is not significant at these counts (0/6 against 4/11), but the direction is clear and matches synth_v1: the tool and its rule added planning, not removed it.
+- **The next fix (synth_v3):** hand the model a main.py, not numbers. `synthesize` now returns a skeleton `main.py` that already compiles and passes every check, the trajectory check included. The rule says to write it first, compile it, then add detail in small edits.
+
+### The skeleton main.py (2026-11-25, no API calls)
+
+- **What `synthesize` returns now:** for a four-bar or slider-crank, also `skeleton_main_py`, a complete main.py:
+  - simple bars at the solved pivots, in the target's plane and height;
+  - the loop closed with `frame_in`, so the rest pose is closed by construction;
+  - `target_path` declared from the target (sweep, stroke, function or path).
+- **Compiled before it is returned.** The tool compiles it in its own folder (`synthesis/NN-<mechanism>-skeleton/`, never the workspace) and reports `skeleton_compile`.
+- **The v2 rule** (two lines; v2 prompt 1,716 tokens): for four-bars and slider-cranks only (wipers, pumps), pick the sweep, stroke or path, call `synthesize`, write its skeleton as main.py, compile, then add detail in small edits.
+- **Why it passes the checks:**
+  - **Layers along the plane's normal.** Four-bar: plate, crank, coupler, rocker on a pivot post. Slider-crank: plate, then crank and slider block side by side, then rod.
+  - **Joined links touch** face to face around their joint, so they stay in contact while they turn, and links that are not joined never meet.
+  - **The one pin is a real pin**, the rocker's pivot post, declared with an allowance. It clears the crank (ground link longer than the crank) and the coupler (rocker x sin(transmission angle) >= 0.57 x rocker at 35 degrees).
+  - **Otherwise there is no skeleton** (`SkeletonError`, reported as "no skeleton: ..."). That happens when the slider block cannot clear the crank (rod under twice the crank), or when these clearances fail.
+- **Files:** `solvers/skeleton.py`, `agent/tools/synthesize.py`, `docs/sdk/synthesis.md` (1,268 tokens), `docs/SOLVERS.md`.
+- **Tests (8 new; each skeleton compiles with 0 failures and 0 warnings, and its trajectory check passes):**
+  - a 90-degree wiper sweep in the xz plane;
+  - a known four-bar's sweep (xy);
+  - a 60 mm pump stroke in the yz plane;
+  - a slider-crank output function;
+  - a four-bar and a slider-crank recorded path (xz plane, 5% off start);
+  - no skeleton for a rod too short;
+  - the tool returns a skeleton that compiled, without touching the workspace.

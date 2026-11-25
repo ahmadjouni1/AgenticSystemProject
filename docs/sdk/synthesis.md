@@ -44,7 +44,12 @@ Points in order of motion; `crank_span` is how far the crank turns from the firs
 
 ## What comes back
 
-`parameters` (lengths in meters, angles in radians), `derived` (the rocker's length,
+**`skeleton_main_py`**: a complete main.py of simple bars at the solved pivots, with the loop
+closure and `target_path`, already compiled (`skeleton_compile` says it passed). Write it as
+main.py, compile, then add detail in small edits; keep its pivots, lengths, joint names and
+`target_path`.
+
+Also `parameters` (lengths in meters, angles in radians), `derived` (the rocker's length,
 `extent`, `min_transmission_deg`, the slider's `offset`), and `rest_points`: the world
 position at q = 0 of `crank_joint` (crank pivot), `coupler_joint` or `rod_joint` (crank pin),
 `rocker_joint` (rocker pivot) or `slide` (the rail), and `pin` (the loop's closing pin).

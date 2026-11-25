@@ -305,8 +305,8 @@ def test_the_tool_is_offered_only_in_prompt_set_v2() -> None:
     at = next(i for i, line in enumerate(lines) if line.startswith("- `testing.md`"))
     assert lines[at + 1].startswith("- `synthesis.md`")
     workflow = lines.index("## Workflow")
-    assert lines[workflow + 2].startswith("**Linkages:** call `synthesize` only for four-bars")
-    assert LINKAGE_RULE.count("\n") == 1 and "target_path" in LINKAGE_RULE  # two lines
+    assert lines[workflow + 2].startswith("**Linkages:** for four-bars and slider-cranks only")
+    assert LINKAGE_RULE.count("\n") == 1 and "skeleton" in LINKAGE_RULE  # two lines
     assert v2.replace(lines[at + 1] + "\n", "").replace(LINKAGE_RULE + "\n\n", "") == v1
 
 
@@ -671,3 +671,83 @@ def test_compile_blocks_a_missed_sweep(tmp_path, extra, passes) -> None:
         assert result.target_path["kind"] == "sweep" and result.target_path["passed"]
     else:
         assert [s.kind for s in result.signals if s.severity == "failure"] == ["target_path"]
+
+
+# ---- the skeleton main.py (after synth_v2) ---------------------------------------------------
+
+
+def compiled_skeleton(tmp_path, mechanism: str, target: dict, constraints: dict):
+    from solvers.skeleton import skeleton_source
+
+    result = solve(mechanism, target, constraints)
+    assert result.within_tolerance, result.message
+    source = skeleton_source(mechanism, result, target)
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "main.py").write_text(source, encoding="utf-8")
+    compiled = compile_run(tmp_path, timeout=180)
+    assert compiled.ok, compiled.signals_text
+    assert "warnings=0" in compiled.signals_text, compiled.signals_text
+    assert compiled.target_path and compiled.target_path["passed"], compiled.target_path
+    return source, compiled
+
+
+@pytest.mark.parametrize("mechanism,target,constraints", [
+    ("four_bar", {"sweep": math.radians(90), "tolerance": 0.01},
+     {"plane": "xz", "height": 0.1, "initial": {"ground_length": 0.25}}),
+    ("four_bar", {"sweep": 0.9035, "tolerance": 0.01}, {"plane": "xy"}),
+    ("slider_crank", {"stroke": 0.06, "tolerance": 0.001}, {"plane": "yz", "height": -0.05}),
+], ids=["wiper-90deg-xz", "sweep-xy", "pump-60mm-yz"])
+def test_a_function_skeleton_compiles_and_passes_every_check(tmp_path, mechanism, target,
+                                                              constraints) -> None:
+    source, compiled = compiled_skeleton(tmp_path, mechanism, target, constraints)
+    assert "target_path = " in source and "frame_in" in source
+    assert compiled.target_path["kind"] in ("sweep", "stroke")
+
+
+def test_a_function_target_skeleton_checks_the_outputs(tmp_path) -> None:
+    crank = np.radians(np.arange(0.0, 360.0, 30.0))
+    known = known_motion("slider_crank", KNOWN_SLIDER_CRANK, crank)
+    _source, compiled = compiled_skeleton(
+        tmp_path, "slider_crank",
+        {"crank": crank.tolist(), "output": known.output.tolist(), "tolerance": 0.0005},
+        {"initial": {**KNOWN_SLIDER_CRANK, "crank_length": 0.028}})
+    assert compiled.target_path["kind"] == "values"
+
+
+@pytest.mark.parametrize("name,known,free", [
+    ("four_bar", KNOWN_FOUR_BAR, ("crank_length", "coupler_length")),
+    ("slider_crank", KNOWN_SLIDER_CRANK, ("crank_length", "rod_length")),
+])
+def test_a_path_skeleton_follows_the_recorded_path(tmp_path, name, known, free) -> None:
+    path = recorded_path(name, known)
+    target = {"points": np.c_[path[:, 0], np.full(len(path), 0.3), path[:, 1]].tolist(),
+              "tolerance": 0.001}
+    fixed = {k: v for k, v in known.items() if k not in free}
+    initial = {k: known[k] * 1.05 for k in free}
+    source, compiled = compiled_skeleton(tmp_path, name, target,
+                                         {"plane": "xz", "fixed": fixed, "initial": initial})
+    assert '"body": "coupler"' in source.replace("'", '"') or name == "slider_crank"
+    assert compiled.target_path["max_error_mm"] <= 1.0
+
+
+def test_a_linkage_the_layers_cannot_clear_gets_no_skeleton() -> None:
+    from solvers.skeleton import SkeletonError, skeleton_source
+
+    short = {**KNOWN_SLIDER_CRANK, "rod_length": 0.045}  # less than twice the crank
+    result = solve("slider_crank", {"stroke": 0.05, "tolerance": 0.01},
+                   {"fixed": {k: short[k] for k in ("crank_length", "rod_length",
+                                                     "crank_phase")}, "time_limit_s": 30})
+    with pytest.raises(SkeletonError, match="rod is too short"):
+        skeleton_source("slider_crank", result, {"stroke": 0.05})
+
+
+def test_the_tool_returns_a_skeleton_that_already_compiles(ctx) -> None:
+    out = run_tool(ctx, "synthesize", {"mechanism": "slider_crank",
+                                       "target": {"stroke": 0.06, "tolerance": 0.001}})
+    assert not out.is_error, out.text
+    data = out.data
+    assert data["skeleton_compile"] == "passed every check, target_path included"
+    assert data["skeleton_main_py"].startswith('"""slider-crank skeleton')
+    assert "write skeleton_main_py as main.py" in data["next"]
+    assert not (ctx.workspace / "main.py").exists()  # the workspace is the model's
+    assert list((ctx.run_dir / "synthesis").glob("*-skeleton/workspace/main.py"))

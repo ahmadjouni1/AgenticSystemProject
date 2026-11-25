@@ -1,14 +1,38 @@
 # Dimensional synthesis
 
-When a point must follow a path (a wiper tip sweeping an arc, a piston stroke, a tool tracing
-a line), do not work the lengths out in your head: `synthesize` computes them. It returns
-the dimensions, the path they predict and the error. Each call runs up to
-`time_limit_s` (default 180 s).
+`synthesize` computes a linkage's dimensions from the motion you want, instead of working
+them out in your head. It returns the dimensions, the predicted motion and its error. Each
+call runs up to `time_limit_s` (default 180 s).
 
-The target is plain data: `{"points": [[x, y, z], ...], "tolerance": 0.002}`, in meters,
-in order of motion (3 to 400 points, the more the better).
+**Supported, and nothing else:**
 
-## Four-bar
+| `mechanism` | Targets |
+| --- | --- |
+| `four_bar` | `sweep` (the rocker's swing, radians), a coupler-point `points` path, or `crank` + `output` |
+| `slider_crank` | `stroke` (the slider's travel, meters), a rod-point `points` path, or `crank` + `output` |
+| `serial_arm` | a tip `points` path, on your newest build |
+
+Any other mechanism (scissor lift, pantograph, gears) answers `unsupported`: design it
+normally. Targets are plain data with an optional `tolerance` in the same unit.
+
+## Wipers: a rocker sweep
+
+```text
+{"mechanism": "four_bar", "target": {"sweep": 1.5708, "tolerance": 0.01},
+ "constraints": {"plane": "xz", "initial": {"ground_length": 0.25}}}
+```
+
+The crank (the motor) turns a full circle and the rocker swings 90 degrees back and forth.
+`initial.ground_length` sets the size; `min_transmission_deg` (default 35) keeps the linkage
+from jamming. Mount each wiper arm on a rocker.
+
+## Pump: a slider stroke
+
+```text
+{"mechanism": "slider_crank", "target": {"stroke": 0.06, "tolerance": 0.001}}
+```
+
+## A coupler-point path
 
 ```text
 {"mechanism": "four_bar",
@@ -16,57 +40,43 @@ in order of motion (3 to 400 points, the more the better).
  "constraints": {"plane": "xz", "crank_span": 6.2832}}
 ```
 
-`crank_span` is how far the crank turns from the first point to the last (default a full
-turn; negative turns the other way). The answer gives `rest_points`: world positions at
-q = 0 of `crank_joint` (crank pivot), `coupler_joint` (crank pin), `rocker_joint` (rocker
-pivot), `pin` (coupler-rocker pin) and `output_point`, plus `parameters` and
-`derived.rocker_length`. Build bars between those points, the crank driving, the
-coupler-rocker pin as the loop closure, and the output point on the coupler.
+Points in order of motion; `crank_span` is how far the crank turns from the first to the last.
 
-## Slider-crank
+## What comes back
 
-```text
-{"mechanism": "slider_crank",
- "target": {"points": [[0.10, 0, 0.05], [0.12, 0, 0.05], ...], "tolerance": 0.001},
- "constraints": {"plane": "xz", "output": "slider", "fixed": {"slider_angle": 0.0}}}
-```
-
-`output: "slider"` tracks the slider pin (a piston); the default tracks a point on the rod
-(`point_x`, `point_y`). `rest_points` gives `crank_joint`, `rod_joint`, `slide` (the rail,
-through the slider pin) and `output_point`. `derived.offset` is the rail's offset from the
-crank pivot.
-
-Both linkages take `initial`, `bounds` and `fixed` ({name: value}) for any parameter in
-`parameters`. A result with `within_tolerance: false` is still the best found: call again
-with `initial` from it, a different `crank_span`, or fewer free parameters.
+`parameters` (lengths in meters, angles in radians), `derived` (the rocker's length,
+`extent`, `min_transmission_deg`, the slider's `offset`), and `rest_points`: the world
+position at q = 0 of `crank_joint` (crank pivot), `coupler_joint` or `rod_joint` (crank pin),
+`rocker_joint` (rocker pivot) or `slide` (the rail), and `pin` (the loop's closing pin).
+Build bars between those points with the crank driving and the pin as the loop closure.
+Constraints for any parameter: `initial`, `bounds`, `fixed` ({name: value}); `plane`
+("xy", "xz", "yz") places the linkage, at `height` for a sweep or stroke (a path gives its
+own). If `within_tolerance` is false, call
+again with `initial` from the result or fewer free parameters.
 
 ## Serial arm
 
-Works on your newest build: compile first.
-
 ```text
-{"mechanism": "serial_arm",
- "target": {"points": [[0.5, 0.0, 0.3], [0.45, 0.2, 0.35], ...], "tolerance": 0.002},
+{"mechanism": "serial_arm", "target": {"points": [[0.5, 0, 0.3], ...]},
  "constraints": {"tip_body": "forearm", "tip_point": [0.3, 0, 0],
    "parameters": [{"name": "upper_arm", "initial": 0.35, "lower": 0.2, "upper": 0.6,
                    "bindings": [{"joint": "elbow", "xyz": [1, 0, 0]}]}]}}
 ```
 
-`initial` is the length as built now; a binding moves that joint's pivot by (value -
-initial) x `xyz`, in its parent body's frame. Optional: `q_start`, `q_end` (joint values
-at the first and last point; default from inverse kinematics), `max_evaluations` (default
-500). The answer gives `joint_origins` (new `parent.at(xyz=..., rpy=...)` per joint) and
-the joint values at each target point.
+It returns `joint_origins` (new `parent.at(xyz=..., rpy=...)` per joint).
 
-## Check the path at compile
+## Check it at compile
 
-Declare the target next to `object_model`; compile then drives `joint` over its range and
-fails if the output point misses the path by more than `tolerance`:
+Declare the target next to `object_model`; a miss blocks the compile:
 
 ```text
+target_path = {"joint": "crank_joint", "output_joint": "wiper_rocker",
+               "sweep": 1.5708, "tolerance": 0.01}
+target_path = {"joint": "crank_joint", "output_joint": "piston_slide",
+               "stroke": 0.06, "tolerance": 0.001}
 target_path = {"body": "coupler", "point": [0.05, 0.03, 0.0], "joint": "crank_joint",
                "points": [[0.20, 0, 0.30], ...], "tolerance": 0.002}
 ```
 
-`point` is in the body's own frame. Optional: `values` (one driver value per point, to
-compare point by point) and `rms_tolerance`.
+`joint` is the driver; `output_joint` is your rocker hinge or slider joint; `point` is in the
+body's own frame.

@@ -18,6 +18,19 @@ hinge) in small steps, with the loop solver's walking warm start, and traces the
 point. Without ``values``, each target point's error is its distance from the traced path.
 The check blocks the compile when the largest error is over ``tolerance`` or the RMS error is
 over ``rms_tolerance``.
+
+**Function targets** (step 13): the motion of an output *joint* against the driver, for a
+wiper's rocker or a pump's slider:
+
+    target_path = {"joint": "crank_joint", "output_joint": "rocker_joint",
+                   "sweep": 1.5708, "tolerance": 0.01}       # radians, peak to peak
+    target_path = {"joint": "crank_joint", "output_joint": "piston_slide",
+                   "stroke": 0.06, "tolerance": 0.001}       # meters, peak to peak
+    target_path = {"joint": "crank_joint", "output_joint": "rocker_joint",
+                   "values": [0, 0.5, ...], "outputs": [0, 0.2, ...], "tolerance": 0.01}
+
+``sweep`` is for a revolute output, ``stroke`` for a prismatic one; ``outputs`` are compared
+as changes from the output at the first driver value.
 """
 
 from __future__ import annotations
@@ -113,9 +126,125 @@ def distance_to_path(points: np.ndarray, path: np.ndarray) -> tuple[np.ndarray, 
     return distance.min(axis=1), distance.argmin(axis=1)
 
 
+_FUNCTION_FIELDS = {"joint", "output_joint", "sweep", "stroke", "values", "outputs",
+                    "tolerance"}
+
+
+def _driver(model, joint: Any) -> str:
+    drivers, members = drivable_joints(model)
+    if joint not in drivers:
+        driver = members.get(joint)
+        hint = (f"; the loop's driver is {driver!r}" if driver else
+                f"; drivable joints: {sorted(drivers)}")
+        raise ValidationError(f"target_path: joint {joint!r} is not a joint you can drive{hint}")
+    return joint
+
+
+def read_function_spec(model, spec: Mapping) -> dict[str, Any]:
+    unknown = set(spec) - _FUNCTION_FIELDS
+    kinds = [k for k in ("sweep", "stroke", "values") if k in spec]
+    if unknown or "tolerance" not in spec or len(kinds) != 1:
+        raise ValidationError(
+            f"target_path with output_joint takes joint, output_joint, tolerance and one of "
+            f"sweep (radians), stroke (meters) or values + outputs; unknown fields "
+            f"{sorted(unknown)}")
+    joint = _driver(model, spec["joint"])
+    output = model.get_joint(spec["output_joint"])
+    if not output.movable:
+        raise ValidationError(f"target_path: output_joint {output.name!r} is fixed")
+    kind = kinds[0]
+    revolute = output.type is JointType.REVOLUTE
+    if (kind == "sweep" and not revolute) or (kind == "stroke" and revolute):
+        raise ValidationError(f"target_path: use sweep for a revolute output_joint and stroke "
+                              f"for a prismatic one ({output.name!r} is {output.type.value})")
+    tolerance = spec["tolerance"]
+    if not isinstance(tolerance, (int, float)) or not tolerance > 0:
+        raise ValidationError("target_path: tolerance must be a positive number")
+    out = {"joint": joint, "output": output.name, "kind": kind, "revolute": revolute,
+           "tolerance": float(tolerance)}
+    if kind == "values":
+        values = np.asarray(spec["values"], dtype=float)
+        outputs = np.asarray(spec.get("outputs"), dtype=float)
+        if values.ndim != 1 or len(values) < 2 or outputs.shape != values.shape:
+            raise ValidationError("target_path: values and outputs must be lists of the same "
+                                  "length (at least 2)")
+        out.update(values=values, outputs=outputs)
+    else:
+        extent = spec[kind]
+        if not isinstance(extent, (int, float)) or not extent > 0:
+            raise ValidationError(f"target_path: {kind} must be a positive number")
+        out["extent"] = float(extent)
+    return out
+
+
+def check_function_target(model, spec: Mapping,
+                          config: CheckConfig = DEFAULT_CONFIG) -> tuple[list[Finding], dict]:
+    """Drive the joint and read the output joint: its sweep or stroke, or its values."""
+    s = read_function_spec(model, spec)
+    driver = model.get_joint(s["joint"])
+    low, high = _joint_range(driver, config, 1.0)
+    values = s["values"] if s["kind"] == "values" else np.linspace(low, high, SAMPLES)
+    got, stopped = [], ""
+    for value in values:
+        try:
+            got.append(model.solve({s["joint"]: float(value)}).joint_values[s["output"]])
+        except (LoopClosureError, PoseError) as exc:
+            stopped = str(exc).splitlines()[0]
+            break
+    output = np.unwrap(np.array(got)) if s["revolute"] else np.array(got)
+    scale, unit = (math.degrees, "deg") if s["revolute"] else ((lambda v: v * 1000), "mm")
+    if s["kind"] == "values":
+        if len(output) < len(values):
+            errors = np.full(len(values), math.inf)
+        else:
+            errors = np.abs((output - output[0]) - (s["outputs"] - s["outputs"][0]))
+        max_error = float(np.max(errors))
+        rms = float(np.sqrt(np.mean(errors ** 2)))
+        what = "output"
+        achieved = None
+    else:
+        achieved = float(np.ptp(output)) if len(output) else 0.0
+        max_error = rms = abs(achieved - s["extent"]) if not stopped else math.inf
+        what = "sweep" if s["kind"] == "sweep" else "stroke"
+    passed = max_error <= s["tolerance"]
+    summary = {"kind": s["kind"], "output_joint": s["output"], "unit": unit,
+               "max_error": _shown(scale, max_error), "rms_error": _shown(scale, rms),
+               "tolerance": scale(s["tolerance"]), "passed": passed,
+               "achieved": None if achieved is None else _shown(scale, achieved),
+               "target": None if achieved is None else scale(s["extent"]), "joint": s["joint"],
+               "samples": len(output)}
+    summary.update(max_error_mm=summary["max_error"], rms_error_mm=summary["rms_error"],
+                   tolerance_mm=summary["tolerance"])  # the compile summary's keys
+    if passed:
+        return [], summary
+    if achieved is not None and not stopped:
+        detail = (f"{s['output']!r} moves {scale(achieved):.4g} {unit} peak to peak, the target "
+                  f"is {scale(s['extent']):.4g} {unit} (tolerance {scale(s['tolerance']):.3g} "
+                  f"{unit})")
+    else:
+        detail = (f"{s['output']!r} misses the target by up to "
+                  f"{_shown(scale, max_error)} {unit} (tolerance {scale(s['tolerance']):.3g} "
+                  f"{unit})")
+    hinge = driver.type is JointType.REVOLUTE
+    driver_scale = math.degrees if hinge else (lambda v: v * 1000)
+    message = (f"target {what} missed: {detail} over {s['joint']} "
+               f"{_shown(driver_scale, low)}..{_shown(driver_scale, high)} "
+               f"{'deg' if hinge else 'mm'}")
+    if stopped:
+        message += f"; the motion stopped early: {stopped}"[:200]
+    return [Finding("target_path", message, True, (), joint=s["output"],
+                    amount=None)], summary
+
+
+def _shown(scale, value: float) -> float | None:
+    return round(scale(value), 3) if math.isfinite(value) else None
+
+
 def check_target_path(model, spec: Any,
                       config: CheckConfig = DEFAULT_CONFIG) -> tuple[list[Finding], dict]:
-    """Findings (one blocking finding if the path is missed) and a summary for the record."""
+    """Findings (one blocking finding if the target is missed) and a summary for the record."""
+    if isinstance(spec, Mapping) and "output_joint" in spec:
+        return check_function_target(model, spec, config)
     s = read_spec(model, spec)
     joint = model.get_joint(s["joint"])
     low, high = _joint_range(joint, config, 1.0)

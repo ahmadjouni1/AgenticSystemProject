@@ -168,7 +168,7 @@ def test_an_isolated_solve_is_stopped_at_its_timeout() -> None:
 
 
 def test_isolated_solver_errors_come_back_as_solver_errors() -> None:
-    with pytest.raises(SolverError, match="unknown mechanism"):
+    with pytest.raises(SolverError, match="unsupported mechanism .hexapod."):
         solve_isolated("hexapod", {"points": [[0, 0, 0], [1, 0, 0], [2, 0, 0]]}, {})
     with pytest.raises(SolverError, match="unknown constraints"):
         solve_isolated("four_bar", {"points": [[0, 0, 0], [1, 0, 0], [2, 0, 0]]},
@@ -305,8 +305,8 @@ def test_the_tool_is_offered_only_in_prompt_set_v2() -> None:
     at = next(i for i, line in enumerate(lines) if line.startswith("- `testing.md`"))
     assert lines[at + 1].startswith("- `synthesis.md`")
     workflow = lines.index("## Workflow")
-    assert lines[workflow + 2].startswith("**Linkages** (four-bar, slider-crank, scissor")
-    assert LINKAGE_RULE.count("\n") <= 2 and "target_path" in LINKAGE_RULE
+    assert lines[workflow + 2].startswith("**Linkages:** call `synthesize` only for four-bars")
+    assert LINKAGE_RULE.count("\n") == 1 and "target_path" in LINKAGE_RULE  # two lines
     assert v2.replace(lines[at + 1] + "\n", "").replace(LINKAGE_RULE + "\n\n", "") == v1
 
 
@@ -353,8 +353,11 @@ def tool_error(ctx, args) -> dict:
 
 def test_the_tool_reports_bad_requests_as_structured_errors(ctx, monkeypatch) -> None:
     line = {"points": [[0, 0, 0], [0.1, 0, 0], [0.2, 0, 0]]}
-    assert tool_error(ctx, {"mechanism": "hexapod", "target": line})["error_kind"] == \
-        "bad_arguments"
+    started = time.perf_counter()
+    scissor = tool_error(ctx, {"mechanism": "scissor_lift", "target": line})
+    assert scissor["error_kind"] == "unsupported" and "design" in scissor["hint"]
+    assert time.perf_counter() - started < 0.5  # answered at once, no solver process
+    assert ctx.cache["synthesis_calls"][-1]["outcome"] == "unsupported"
     bad = tool_error(ctx, {"mechanism": "four_bar", "target": {"points": [[0, 0, "x"]] * 3}})
     assert bad["error_kind"] == "bad_arguments"  # the schema says numbers
     same = tool_error(ctx, {"mechanism": "four_bar", "target": {"points": [[0, 0, 0]] * 3}})
@@ -513,3 +516,158 @@ def test_compile_blocks_a_missed_target_path(tmp_path, shift, passes) -> None:
         assert not result.ok
         assert [s.kind for s in result.signals if s.severity == "failure"] == ["target_path"]
         assert "synthesize" in result.signals_text  # the hint names the tool
+
+
+# ---- function generation (after synth_v1): output motion vs crank angle --------------------
+
+
+def known_motion(name: str, params: dict, crank=None):
+    from solvers.function import motion
+
+    return motion(LINKAGES[name], params, 2 * math.pi, step=math.radians(1.0), at=crank)
+
+
+def rebuilt_check(name: str, params: dict, spec: dict) -> dict:
+    """Independent check of a solved design: build it again, run the compile's check."""
+    from sdk.target_path import check_target_path as check
+
+    assembly, _ = LINKAGES[name].build(params, 2 * math.pi)
+    findings, summary = check(assembly, {"joint": "crank_joint", **spec})
+    assert not findings, findings
+    return summary
+
+
+@pytest.mark.parametrize("data,match", [
+    ({"sweep": -1.0}, "positive"),
+    ({"sweep": 1.0, "stroke": 0.05}, "one of"),
+    ({"stroke": "60 mm"}, "positive"),
+    ({"sweep": 1.0, "points": 3}, "points"),
+    ({"crank": [0, 1, 2], "output": [0, 0.1, 0.2, 0.3]}, "same length"),
+    ({"crank": [0, 1, 2], "output": [0, 0.1, 0.2], "lambda": "x"}, "unknown fields"),
+], ids=["negative", "two", "string", "mixed", "lengths", "extra"])
+def test_function_targets_are_checked_as_data(data, match) -> None:
+    from solvers.base import parse_target
+
+    with pytest.raises(SolverError, match=match):
+        parse_target(data)
+
+
+def test_function_targets_go_only_to_mechanisms_that_have_that_output() -> None:
+    with pytest.raises(SolverError, match="takes a \"sweep\" target"):
+        solve("four_bar", {"stroke": 0.06}, {})
+    with pytest.raises(SolverError, match="takes a \"stroke\" target"):
+        solve("slider_crank", {"sweep": 1.0}, {})
+    with pytest.raises(SolverError, match="path target"):
+        solve("serial_arm", {"sweep": 1.0}, {})
+    with pytest.raises(SolverError, match="unsupported mechanism 'pantograph'"):
+        solve("pantograph", {"sweep": 1.0}, {})
+
+
+def test_four_bar_sweep_of_a_known_linkage_is_recovered() -> None:
+    known = known_motion("four_bar", KNOWN_FOUR_BAR)
+    tolerance = math.radians(0.5)
+    result = solve("four_bar", {"sweep": known.extent, "tolerance": tolerance}, {})
+    assert result.within_tolerance, result.message
+    assert result.details["derived"]["min_transmission_deg"] >= 34.5
+    summary = rebuilt_check("four_bar", result.parameters, {
+        "output_joint": "rocker_joint", "sweep": known.extent, "tolerance": tolerance})
+    assert summary["passed"] and summary["achieved"] == pytest.approx(
+        math.degrees(known.extent), abs=0.5)
+
+
+def test_a_wiper_sweep_of_90_degrees_without_jamming() -> None:
+    started = time.perf_counter()
+    result = solve("four_bar", {"sweep": math.radians(90), "tolerance": math.radians(0.5)},
+                   {"initial": {"ground_length": 0.25}})
+    assert result.within_tolerance and result.feasible, result.message
+    assert result.details["derived"]["grashof"]
+    assert result.details["derived"]["min_transmission_deg"] >= 34.5
+    assert time.perf_counter() - started < 60
+    rebuilt_check("four_bar", result.parameters, {"output_joint": "rocker_joint",
+                                                  "sweep": math.radians(90),
+                                                  "tolerance": math.radians(0.5)})
+
+
+def test_four_bar_function_of_a_known_linkage_is_recovered() -> None:
+    crank = np.radians(np.arange(0.0, 360.0, 30.0))
+    known = known_motion("four_bar", KNOWN_FOUR_BAR, crank)
+    start = {**KNOWN_FOUR_BAR, "crank_length": 0.034, "coupler_length": 0.085,
+             "coupler_angle": 0.95}  # not a uniform scale: angles change
+    tolerance = math.radians(0.5)
+    result = solve("four_bar", {"crank": crank.tolist(), "output": known.output.tolist(),
+                                "tolerance": tolerance}, {"initial": start})
+    assert result.within_tolerance, result.message
+    ratio = lambda p, k: p[k] / p["ground_length"]  # noqa: E731 - angles fix only ratios
+    for key in ("crank_length", "coupler_length"):
+        assert ratio(result.parameters, key) == pytest.approx(ratio(KNOWN_FOUR_BAR, key),
+                                                              rel=0.03), key
+    rebuilt_check("four_bar", result.parameters, {
+        "output_joint": "rocker_joint", "values": crank.tolist(),
+        "outputs": known.output.tolist(), "tolerance": tolerance})
+
+
+def test_slider_stroke_and_function_are_recovered() -> None:
+    result = solve("slider_crank", {"stroke": 0.06, "tolerance": 0.0005}, {})
+    assert result.within_tolerance, result.message
+    rebuilt_check("slider_crank", result.parameters, {"output_joint": "slide",
+                                                      "stroke": 0.06, "tolerance": 0.0005})
+    crank = np.radians(np.arange(0.0, 360.0, 30.0))
+    known = known_motion("slider_crank", KNOWN_SLIDER_CRANK, crank)
+    start = {**KNOWN_SLIDER_CRANK, "crank_length": 0.028, "rod_length": 0.07}
+    result = solve("slider_crank", {"crank": crank.tolist(), "output": known.output.tolist(),
+                                    "tolerance": 0.0005}, {"initial": start})
+    assert result.within_tolerance, result.message
+    assert result.parameters["crank_length"] == pytest.approx(0.025, rel=0.05)
+    rebuilt_check("slider_crank", result.parameters, {
+        "output_joint": "slide", "values": crank.tolist(), "outputs": known.output.tolist(),
+        "tolerance": 0.0005})
+
+
+def test_the_tool_answers_a_sweep_in_degrees_with_a_target_path_to_declare(ctx) -> None:
+    out = run_tool(ctx, "synthesize", {"mechanism": "four_bar",
+                                       "target": {"sweep": 0.9, "tolerance": 0.01},
+                                       "constraints": {"plane": "xz", "height": 0.1}})
+    assert not out.is_error, out.text
+    data = out.data
+    assert data["within_tolerance"] and data["error_deg"]["max"] <= 0.573
+    assert data["target_path"] == {"joint": "crank_joint", "output_joint": "rocker_joint",
+                                   "sweep": 0.9, "tolerance": 0.01}
+    assert data["rest_points"]["crank_joint"][1] == pytest.approx(0.1)  # the plane's y
+    assert data["predicted_motion"]["columns"][1] == "rocker_joint (rad)"
+
+
+def test_the_function_check_passes_fails_and_rejects_the_wrong_kind() -> None:
+    from examples.four_bar import build
+
+    model = build()
+    known = known_motion("four_bar", {**KNOWN_FOUR_BAR})  # the example's own linkage
+    spec = {"joint": "crank_joint", "output_joint": "rocker_joint", "sweep": known.extent,
+            "tolerance": 0.01}
+    findings, summary = check_target_path(model, spec)
+    assert not findings and summary["passed"] and summary["unit"] == "deg"
+    findings, summary = check_target_path(model, {**spec, "sweep": known.extent + 0.2})
+    assert len(findings) == 1 and findings[0].blocking and not summary["passed"]
+    assert "target sweep missed" in findings[0].message and "deg" in findings[0].message
+    with pytest.raises(ValidationError, match="use sweep for a revolute"):
+        check_target_path(model, {**{k: v for k, v in spec.items() if k != "sweep"},
+                                  "stroke": 0.05})
+    with pytest.raises(ValidationError, match="not a joint you can drive"):
+        check_target_path(model, {**spec, "joint": "rocker_joint"})
+
+
+@pytest.mark.parametrize("extra,passes", [(0.0, True), (0.2, False)])
+def test_compile_blocks_a_missed_sweep(tmp_path, extra, passes) -> None:
+    known = known_motion("four_bar", KNOWN_FOUR_BAR)
+    spec = {"joint": "crank_joint", "output_joint": "rocker_joint",
+            "sweep": known.extent + extra, "tolerance": 0.01}
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "main.py").write_text(
+        "from examples.four_bar import build\n\nobject_model = build()\n"
+        f"target_path = {json.dumps(spec)}\n", encoding="utf-8")
+    result = compile_run(tmp_path, timeout=180)
+    assert result.ok == passes, result.signals_text
+    if passes:
+        assert "rocker_joint sweep" in result.signals_text
+        assert result.target_path["kind"] == "sweep" and result.target_path["passed"]
+    else:
+        assert [s.kind for s in result.signals if s.severity == "failure"] == ["target_path"]

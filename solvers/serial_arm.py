@@ -53,6 +53,8 @@ class SerialArm:
 
     def solve(self, target: Target, constraints: dict[str, Any]) -> SolverResult:
         started = time.perf_counter()
+        if not isinstance(target, Target):
+            raise SolverError("serial_arm takes a path target: {\"points\": [[x, y, z], ...]}")
         unknown = set(constraints) - _FIELDS
         if unknown:
             raise SolverError(f"serial_arm: unknown constraints {sorted(unknown)}; fields: "

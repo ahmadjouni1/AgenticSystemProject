@@ -48,7 +48,7 @@ from scipy.interpolate import CubicSpline
 
 from sdk import Assembly, Box
 from sdk.errors import LoopClosureError, PoseError
-from solvers.base import SolverError, SolverResult, Target
+from solvers.base import FunctionTarget, SolverError, SolverResult, Target
 from solvers.nested import Settings, Task
 from solvers.search import Synthesis
 from solvers.serial_arm import errors
@@ -276,7 +276,12 @@ class PlanarLoop:
         self.linkage = linkage
         self.name = linkage.name
 
-    def solve(self, target: Target, constraints: dict[str, Any]) -> SolverResult:
+    def solve(self, target: Target | FunctionTarget,
+              constraints: dict[str, Any]) -> SolverResult:
+        if isinstance(target, FunctionTarget):
+            from solvers.function import solve_function
+
+            return solve_function(self, target, constraints)
         started = time.perf_counter()
         linkage = self.linkage
         unknown = set(constraints) - _FIELDS

@@ -3145,3 +3145,53 @@ The WSL copy included the teammate's two synthesis tools (Articraft commits `03f
 - **Recorded per run** (`record.json` → `synthesis`): every synthesize call (mechanism, outcome, error, wall time), the total solve time, whether the final build declares `target_path`, and its trajectory-check summary. Compile results carry that summary, cached ones included.
 - **`scripts/synthesis_report.py`:** the with/without comparison (success, cost per run and per success, time, reasoning before the first compile, tool-use rate) and a per-run table.
 - **Tests:** +1 (a scripted v2 run records one failed synthesize call and a final build whose target path passed; v1 does not offer the tool); the prompt test checks the rule's place and that v2 minus its two inserts equals v1.
+
+### Re-test synth_v1 (2026-11-25, 10:00-10:44 UTC, off-peak): stopped, a mismatched tool
+
+Prompt set v2 as committed in `16ee664`, 4 closed-loop prompts x 2 runs, `--jobs 2`, cap $2.40. The balance was $3.92 at the start. The run was **stopped after 5 of 8 runs had started**, when the PC had to sleep: `taskkill /T` on eval.py's process tree. The two runs then in progress read as `crashed`, which the report counts as interrupted and eval.py would resume. The user then chose to **fix the tool and rerun all 8 as a new evaluation** (synth_v2), so synth_v1 stays as this finding and is not resumed.
+
+**Spend:** $0.645 tracked; the balance went $3.92 → $3.28 ($0.64).
+
+| Run | End | Cost | Time | synthesize calls | Final build |
+| --- | --- | --- | --- | --- | --- |
+| pantograph r1 | **success** | $0.139 | 13 min | 0 | v0000, no `target_path` |
+| scissor lift r1 | no progress: 3 empty replies, no build | $0.183 | 25 min | 0 | none |
+| windshield wipers r1 | no progress: 3 empty replies, no build | $0.165 | 25 min | 0 | none |
+| crank-slider pump r1 | stopped (interrupted) | $0.150 | 16 min | 3, all within tolerance (0.03-0.05 mm, 10-18 s) | last_failed: `target_path` declared, missed by 0.92 mm against 0.6 mm |
+| scissor lift r2 | stopped (interrupted) | $0.008 | 1 min | 0 | none |
+
+**What it showed: the tool did not fit two of the four tasks, and the prompt pushed the model at it.**
+
+- **Wipers:** the model read `synthesis.md`, then reasoned for over 100k characters (two replies cut off at 32k tokens, then a third empty reply) about how to make the tool fit. A wiper needs its *rocker* to sweep a given angle: **function generation** (output angle vs crank angle). Plug-in B only did **path generation** (a coupler point through given points), so there was no direct way to ask for "the rocker sweeps 90 degrees". It never called the tool and never wrote main.py.
+- **Scissor lift:** neither a four-bar nor a slider-crank. Same ending: two cut-off replies of reasoning, no build. The v2 rule listed scissors among the linkages to synthesize.
+- **The pump**, the case the tool fits (a slider-crank, the piston on a stroke), used it as intended: three solves within tolerance, a build around them, `target_path` declared, and the trajectory check caught a build 0.92 mm off its own target. It was mid-fix when stopped.
+- **The pantograph** succeeded without calling the tool.
+- **Lesson:** a tool must say what it cannot do, and the rule must name exactly where it applies. Otherwise the model spends its planning budget trying to bend the tool to the task, the step 10b failure mode again (planning cut off at the output limit).
+
+**Fixes before synth_v2:**
+- Function generation (rocker sweep, slider stroke, output vs crank angle) in plug-in B.
+- An explicit supported list, with "unsupported" for anything else.
+- A precise rule: synthesize only four-bars and slider-cranks.
+- Function targets in the trajectory check.
+
+### Fixes after synth_v1 (2026-11-25, no API calls)
+
+| # | What | Files |
+| --- | --- | --- |
+| 1 | **Function generation in plug-in B.** Targets for the output *joint* against the crank angle: `{"sweep": rad}` (a four-bar's rocker swing), `{"stroke": m}` (a slider's travel), or `{"crank": [...], "output": [...]}`. The crank angles are given, so the nested inner loop has nothing to do: the design is fitted with SciPy `least_squares` on outputs posed by our loop solver every 5 degrees. It is penalized when the crank cannot turn through the span, and when a four-bar's transmission angle falls under 35 degrees (`min_transmission_deg`). The final design is checked again every degree and at each given crank angle. It stops within a fifth of the tolerance | `solvers/function.py`, `solvers/base.py` (`parse_target`, `FunctionTarget`) |
+| 2 | **An explicit supported list:** `four_bar` and `slider_crank` (path, sweep or stroke, function) and `serial_arm` (path), in `synthesis.md` and the tool schema. Any other mechanism returns `unsupported` at once (no process), with "design this mechanism normally". The schema no longer has an enum, so a scissor lift gets that answer rather than a schema error. `serial_arm` stays in the list: plug-in A works and is tested; the v2 rule does not point the model at it | `solvers/base.py`, `agent/tools/synthesize.py`, `docs/sdk/synthesis.md` |
+| 3 | **A precise two-line rule** in v2: call `synthesize` only for four-bars and slider-cranks (wipers, pumps, crank-rockers); pick the sweep, stroke or path, build, declare `target_path`; design other linkages normally. The v2 system prompt is 1,714 tokens (limit 2,000). `synthesis.md`: 1,148 tokens (limit 1,500) | `agent/tools/synthesize.py`, `docs/sdk/synthesis.md` |
+| 4 | **Function targets in the trajectory check:** `{"joint", "output_joint", "sweep" \| "stroke" \| "values" + "outputs", "tolerance"}`. It drives the joint over its range in 361 steps and reads the output joint (unwrapped for a hinge). A miss is blocking. `sweep` must name a revolute output and `stroke` a prismatic one. The compile summary reports the achieved sweep or stroke | `sdk/target_path.py`, `compiler/runner.py` |
+| 5 | **`docs/SOLVERS.md` for our teammate:** the interface, plug-ins A and B, known gaps, offline testing, why the originals must never be edited, and what synth_v1 showed | `docs/SOLVERS.md` |
+| 6 | **The comparison report** covers three setups: no tool, synth_v1 and synth_v2, with the trajectory-check pass rate | `scripts/synthesis_report.py` |
+
+**Function generation on known mechanisms** (tests; each solved design is rebuilt and checked by the compile's own check):
+
+| Target | Result | Time |
+| --- | --- | --- |
+| a known four-bar's sweep (51.8 deg), tolerance 0.5 deg | within tolerance, transmission >= 34.5 deg | 2.9 s |
+| a 90-degree wiper sweep | 0.07 deg off; Grashof crank-rocker; transmission 36 deg | 3.3 s |
+| a known four-bar's rocker angle at 12 crank angles, from a non-uniform start | crank/ground and coupler/ground within 3% of the known ratios (angles fix only ratios) | 4.2 s |
+| a 60 mm stroke; a known slider-crank's travel at 12 crank angles | within 0.5 mm; crank within 5% of the known 25 mm | 3.9 s for both |
+
+**Tests:** 15 new in `tests/test_solvers.py` (function targets checked as data, mismatched target kinds, `unsupported` answered at once, the four recoveries above, the tool's sweep answer with a ready `target_path`, the function check passing, failing and rejecting the wrong kind, and compile blocking a missed sweep). The `hexapod` and rule tests were updated.

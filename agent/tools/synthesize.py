@@ -30,20 +30,19 @@ from agent.tools.builds import newest_build, round_list
 from agent.tools.core import AgentTool, ToolContext, ToolError
 from sdk.frames import Frame
 from sdk.transforms import invert
-from solvers.base import SolverError, SolverResult, SolverTimeout, solve_isolated
+from solvers.base import (SolverError, SolverResult, SolverTimeout, Unsupported,
+                          check_supported, solve_isolated)
 
 MECHANISMS = ("four_bar", "slider_crank", "serial_arm")
 DEFAULT_TIME_LIMIT_S = 180.0  # the solve's own limit; it then returns its best design
 MAX_TIME_LIMIT_S = 240.0
 STARTUP_S = 60.0  # the solver process starts, imports, and verifies the final design
 MAX_PATH_POINTS = 40
-SYSTEM_LINE = ("- `synthesis.md`: the `synthesize` tool, which computes a four-bar's, a "
-               "slider-crank's or a serial arm's dimensions from a target path, and "
-               "`target_path`, which makes compile check that path.")
-LINKAGE_RULE = ("**Linkages** (four-bar, slider-crank, scissor, pantograph, wipers): first choose "
-                "the motion\nnumbers yourself (sweep angle, stroke, lift height, scale), call "
-                "`synthesize` for the\ndimensions, build around them, and declare `target_path` "
-                "so compile verifies the motion.")
+SYSTEM_LINE = ("- `synthesis.md`: the `synthesize` tool (four-bar and slider-crank dimensions "
+               "from a sweep, stroke or path) and `target_path`, which makes compile check it.")
+LINKAGE_RULE = ("**Linkages:** call `synthesize` only for four-bars and slider-cranks (wipers, "
+                "pumps, crank-rockers):\npick the sweep, stroke or path, then build and declare "
+                "`target_path`. Design other linkages normally.")
 
 
 def _frames(build) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -128,8 +127,11 @@ def run_synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {"mechanism": args.get("mechanism")}
     try:
         out = _synthesize(ctx, args)
+        key = "error_deg" if "error_deg" in out else "error_mm"
         entry.update(outcome="within_tolerance" if out["within_tolerance"] else "outside",
-                     error_max_mm=out["error_mm"]["max"], solve_s=out["seconds"])
+                     target=next(k for k in ("points", "sweep", "stroke", "crank")
+                                 if k in args["target"]),
+                     **{f"{key}_max": out[key]["max"]}, solve_s=out["seconds"])
         return out
     except ToolError as exc:
         entry["outcome"] = exc.kind
@@ -141,6 +143,11 @@ def run_synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 def _synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     mechanism, target = args["mechanism"], args["target"]
+    try:
+        check_supported(mechanism)
+    except Unsupported as exc:
+        raise ToolError("unsupported", str(exc), "design this mechanism normally, without "
+                        "synthesize") from None
     constraints = dict(args.get("constraints") or {})
     limit = constraints.get("time_limit_s", DEFAULT_TIME_LIMIT_S)
     if not isinstance(limit, (int, float)) or not 5 <= limit <= MAX_TIME_LIMIT_S:
@@ -161,17 +168,25 @@ def _synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     details = result.details
     path = result.trajectory
     step = max(1, -(-len(path) // MAX_PATH_POINTS))
+    function = details.get("kind") in ("sweep", "stroke", "function")
+    degrees = details.get("unit") == "rad"
+    scale, unit = (57.29577951308232, "deg") if degrees else (1000.0, "mm")
     out: dict[str, Any] = {
         "mechanism": mechanism,
         "within_tolerance": result.within_tolerance,
         "feasible": result.feasible,
         "message": result.message,
-        "error_mm": {"max": round(result.error["max"] * 1000, 4),
-                     "rms": round(result.error["rms"] * 1000, 4)},
+        f"error_{unit}": {"max": round(result.error["max"] * scale, 4),
+                          "rms": round(result.error["rms"] * scale, 4)},
         "parameters": {k: round(v, 6) for k, v in result.parameters.items()},
-        "predicted_path": [round_list(p, 5) for p in path[::step]],
         "seconds": details.get("process_seconds"),
     }
+    if function:
+        out["predicted_motion"] = {
+            "columns": ["crank (rad)", f"{details['output_joint']} ({details['unit']})"],
+            "rows": [round_list(p, 5) for p in path[::step]]}
+    else:
+        out["predicted_path"] = [round_list(p, 5) for p in path[::step]]
     if mechanism == "serial_arm":
         out["joint_origins"] = _joint_origins(result, frames)
         out["joint_path_at_targets"] = {
@@ -183,26 +198,49 @@ def _synthesize(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         out["derived"] = {k: round(v, 6) if isinstance(v, float) else v
                           for k, v in details["derived"].items()}
         out["rest_points"] = {k: round_list(v) for k, v in details["rest_points"].items()}
-        out["crank_values_at_targets"] = round_list(details["crank_values"][::step], 4)
-        out["next"] = ("Build the linkage with these pivots and pins at q = 0 (the crank "
-                       "turns from 0 to crank_span), then declare target_path so compile "
-                       "checks the path.")
+        if function:
+            out["target_path"] = _function_target_path(target, details)
+            out["next"] = ("Build the linkage with these pivots and pins at q = 0, then "
+                           "declare target_path (output_joint is your own joint's name) so "
+                           "compile checks the motion.")
+        else:
+            out["crank_values_at_targets"] = round_list(details["crank_values"][::step], 4)
+            out["next"] = ("Build the linkage with these pivots and pins at q = 0 (the crank "
+                           "turns from 0 to crank_span), then declare target_path so compile "
+                           "checks the path.")
     out["saved"] = _save(ctx, mechanism, constraints, result)
     return out
 
 
+def _function_target_path(target: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+    """The target_path to declare for this function target (the joint names are ours)."""
+    spec: dict[str, Any] = {"joint": "crank_joint", "output_joint": details["output_joint"]}
+    if details["kind"] == "function":
+        spec.update(values=target["crank"], outputs=target["output"])
+    else:
+        spec[details["kind"]] = target[details["kind"]]
+    spec["tolerance"] = details["tolerance"]
+    return spec
+
+
 _POINTS = {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}
+_NUMBERS = {"type": "array", "items": {"type": "number"}}
 
 SYNTHESIZE = AgentTool(
     "synthesize",
-    "Compute a four_bar's, slider_crank's or serial_arm's dimensions so a point follows a "
-    "target path (meters); returns the dimensions, the predicted path and its error.",
+    "Dimensions of a four_bar or slider_crank (a point path, a rocker sweep or a slider "
+    "stroke) or a serial_arm (a path). Any other mechanism is unsupported: design it normally.",
     {"type": "object", "properties": {
-        "mechanism": {"type": "string", "enum": list(MECHANISMS)},
+        "mechanism": {"type": "string",
+                      "description": "four_bar | slider_crank | serial_arm; nothing else"},
         "target": {"type": "object", "properties": {
-            "points": {**_POINTS, "description": "[x, y, z] in meters, in order of motion"},
-            "tolerance": {"type": "number", "description": "meters (default 0.002)"},
-        }, "required": ["points"], "additionalProperties": False},
+            "points": {**_POINTS, "description": "a path: [x, y, z] in meters, in order"},
+            "sweep": {"type": "number", "description": "four_bar: rocker swing, radians"},
+            "stroke": {"type": "number", "description": "slider_crank: slider travel, meters"},
+            "crank": {**_NUMBERS, "description": "with output: crank angles, radians"},
+            "output": {**_NUMBERS, "description": "rocker (rad) or slider (m) at each angle"},
+            "tolerance": {"type": "number", "description": "in the target's unit"},
+        }, "additionalProperties": False},
         "constraints": {"type": "object",
                         "description": "per mechanism; see docs/sdk/synthesis.md"},
     }, "required": ["mechanism", "target"], "additionalProperties": False},

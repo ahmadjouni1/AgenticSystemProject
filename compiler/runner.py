@@ -160,9 +160,15 @@ def compile(run_dir: str | os.PathLike[str], timeout: float = DEFAULT_TIMEOUT, *
                    f"(bodies={model.get('bodies')}, joints={model.get('joints')}, "
                    f"closures={model.get('closures')}, mimics={model.get('mimics')}).")
         path = model.get("target_path")
-        if path:
-            summary += (f" target_path: max error {path['max_error_mm']} mm, RMS "
-                        f"{path['rms_error_mm']} mm (tolerance {path['tolerance_mm']:.3g} mm).")
+        if path and path.get("kind") in ("sweep", "stroke"):
+            summary += (f" target_path: {path['output_joint']} {path['kind']} "
+                        f"{path['achieved']} {path['unit']} (target {path['target']:.4g}, "
+                        f"tolerance {path['tolerance']:.3g} {path['unit']}).")
+        elif path:
+            unit = path.get("unit", "mm")
+            summary += (f" target_path: max error {path['max_error_mm']} {unit}, RMS "
+                        f"{path['rms_error_mm']} {unit} (tolerance {path['tolerance_mm']:.3g} "
+                        f"{unit}).")
     result = CompileResult(
         status=status,
         signals_text=feedback.render_signals(status, signals, success_summary=summary,

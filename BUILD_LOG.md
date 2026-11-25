@@ -3247,3 +3247,40 @@ Prompt set v2 as committed in `16ee664`, 4 closed-loop prompts x 2 runs, `--jobs
   - a four-bar and a slider-crank recorded path (xz plane, 5% off start);
   - no skeleton for a rod too short;
   - the tool returns a skeleton that compiled, without touching the workspace.
+
+### Re-test synth_v3 (2026-11-25, 13:33-14:24 UTC, off-peak): the skeleton gives passing builds
+
+**The run:** wipers and pump x 2, prompt set v2 with the skeleton (`afe3573`, test fix `e487831`), `--jobs 2`, cap $1.00.
+
+**Spend:** $0.762 tracked. The balance went $2.07 → $1.39; the balance lags billing, so the full drop is still to come. $1.39 - ($0.762 - $0.68) ≈ $1.31 will be left, above the $0.90 to keep.
+
+**Machine load:** a game used about 60% of the CPU for the first minutes of runs 1-2, then was closed.
+
+| Run | End | Cost | First compile (turn, reasoning before it) | synthesize | Best build | Trajectory check |
+| --- | --- | --- | --- | --- | --- | --- |
+| crank-slider pump r1 | time limit | $0.207 | turn 5, **0.8k** tokens | stroke 60 mm, within tolerance, 6 s | **v0000 passed every check** (the skeleton) | passed: 60.0 mm |
+| crank-slider pump r2 | time limit | $0.184 | turn 7, 46k | stroke 80 mm, within tolerance, 5 s | **v0000 passed every check** (the skeleton) | passed: 80.0 mm |
+| windshield wipers r1 | no progress, no build | $0.188 | none (2 cut-off replies) | sweep 90 deg, within tolerance, 8 s | none | - |
+| windshield wipers r2 | time limit | $0.182 | turn 10, 56k | sweep twice, within tolerance | last_failed: an overlap | passed: 90.07 deg |
+
+**Comparison, all versions** (`scripts/synthesis_report.py`; "no tool" is eval_v1 for the scissor lift, wipers and pantograph and step 10b B2 for the pump; full table in `runs/eval_synth_v3/synthesis_report.md`):
+
+| Prompts, setup | Success | Cost / run | Cost / success | Time | Reasoning before first compile (median) | Tool used | Trajectory check passed | Best build passed every check |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| wipers + pump, no tool (v1) | **3/6** | $0.229 | $0.458 | 20.6 min | 37k | - | - | 3/6 |
+| wipers + pump, synth_v1 (mismatched) | 0/1 (+1 interrupted) | $0.165 | - | 24.6 min | 75k | 0/1 | 0/1 | 0/1 |
+| wipers + pump, synth_v2 (fixed tool) | 0/3 | $0.191 | - | 24.8 min | 90k | 3/3 | 0/3 | 0/3 |
+| wipers + pump, synth_v3 (skeleton) | 0/4 | $0.190 | - | 24.5 min | 51k | 4/4 | 3/4 | **2/4** |
+| all four, no tool (v1) | **4/11** | $0.242 | $0.665 | 20.0 min | 39k | - | - | 4/11 |
+| all four, synth_v1 (mismatched) | 1/3 (+2 interrupted) | $0.162 | $0.487 | 20.9 min | 75k | 0/3 | 0/3 | 1/3 |
+| all four, synth_v2 (fixed tool) | 0/6 | $0.189 | - | 24.6 min | 81k | 3/6 | 0/6 | 0/6 |
+
+**What it showed:**
+- **The skeleton does what it was built for.** Both pump runs wrote it and compiled it, and each kept a build that passed every check with its stroke verified. Pump r1 got there with 0.8k reasoning tokens before its first compile (step 10b's pump runs: 40k). It is the first time a tool-on run ended with a passing, path-checked build.
+- **The step after it fails.** Neither pump run added detail in small edits, as the rule says. Each replaced the whole main.py in one `write`; that build failed (an overlap, a validation error), the fix cycle ran into the 25-minute limit, and the run ended `time_exceeded` with the skeleton as its best build. A run counts as a success only when its latest compile passes and it gives a final message, so these are 0/2 under the eval's rule, though 2/2 have a passing build.
+- **The wipers still plan too long.** Both wipers runs got a compiled skeleton and then planned the whole car in their reasoning (cowl, glass, motor housing, a second wiper on a mimic or a second linkage): 85k and 56k tokens before any compile. One never compiled; the other wrote its whole design at turn 10 and failed on an overlap. A pair of wipers is not one four-bar, so the skeleton covers only half of the object, and the model redesigns from scratch instead of extending it.
+- **Overall: no success gain from the tool in three tries,** against 3/6 on wipers and pump without it. These are small samples (indicative only), but every tool-on version so far ended worse on the eval's success rule, at a similar cost per run.
+- **What would likely help next** (not done):
+  1. A passing skeleton should count. When time runs out, finish with the latest *passing* build (the loop already keeps it; the time-up final turn could fire on the last passing build instead of requiring the latest compile to pass).
+  2. Enforce "small edits" after a passing compile: refuse a whole-file `write` once a build has passed, so detail is added with `edit`.
+  3. For the wipers, a two-rocker skeleton (one crank, two rockers through a second coupler), or tell the model the skeleton is one wiper and the second follows on a mimic joint.

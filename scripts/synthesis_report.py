@@ -74,7 +74,7 @@ def path_check(record: dict) -> tuple[bool, bool]:
 def row(label: str, runs: list[dict], cut: int, tool: bool) -> str:
     note = f" (+{cut} interrupted)" if cut else ""
     if not runs:
-        return f"| {label} | 0 runs{note} | | | | | | |"
+        return f"| {label} | 0 runs{note} | | | | | | | |"
     ok = sum(r["status"] == "success" for r in runs)
     cost = sum(r["cost_usd"] for r in runs)
     per_success = f"${cost / ok:.3f}" if ok else "-"
@@ -84,8 +84,9 @@ def row(label: str, runs: list[dict], cut: int, tool: bool) -> str:
     checks = [path_check(r) for r in runs]
     passed = (f"{sum(p for _d, p in checks)}/{len(runs)} (declared {sum(d for d, _p in checks)})"
               if tool else "-")
+    kept = sum(bool((r.get("best") or {}).get("passed_checks")) for r in runs)
     return (f"| {label} | {ok}/{len(runs)}{note} | ${cost / len(runs):.3f} | {per_success} | "
-            f"{minutes:.1f} min | {reasoning / 1000:.0f}k | {use} | {passed} |")
+            f"{minutes:.1f} min | {reasoning / 1000:.0f}k | {use} | {passed} | {kept}/{len(runs)} |")
 
 
 def per_run(setup: str, prompt: str, record: dict) -> str:
@@ -105,9 +106,10 @@ def per_run(setup: str, prompt: str, record: dict) -> str:
 
 def main() -> int:
     head = ("| Prompt, setup | Success | Cost / run | Cost / success | Time | Reasoning before "
-            "first compile (median) | Tool used | Trajectory check passed |\n"
-            "| --- | --- | --- | --- | --- | --- | --- | --- |")
-    lines = ["## Closed-loop prompts: no tool vs synth_v1 vs synth_v2", "", head]
+            "first compile (median) | Tool used | Trajectory check passed | Best build "
+            "passed every check |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines = ["## Closed-loop prompts: no tool vs synth_v1, synth_v2 and synth_v3", "", head]
     totals = {setup: ([], 0) for setup in SETUPS}
     details = []
     for prompt, name in PROMPTS.items():

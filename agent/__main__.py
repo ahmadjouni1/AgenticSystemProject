@@ -30,6 +30,7 @@ import sys
 from agent import storage
 from agent.context import ContextConfig, ContextPolicy
 from agent.loop import (DEFAULT_PROMPT_SET, FIX_RESERVE_S, MAX_TIME_S, MAX_TURNS, PROMPT_SETS,
+                        LoopFixes,
                         RUNS_ROOT, EffortPolicy, new_run_dir, resume, run, saved_options)
 from llm import Budget, config, get_model, load_env
 
@@ -105,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--two-phase", action="store_true",
                         help="high-detail mode: a skeleton first (must pass every check), then "
                              "the detail; about 40%% more cost per success")
+    parser.add_argument("--no-finish-on-best", action="store_true",
+                        help="at the time limit, do not end on the latest passing build")
+    parser.add_argument("--allow-rewrites", action="store_true",
+                        help="allow whole-file writes of main.py after a build passed")
     args = parser.parse_args(argv)
     modes = [m for m in ("prompt", "resume", "list_root") if getattr(args, m)]
     if len(modes) != 1:
@@ -137,7 +142,9 @@ def main(argv: list[str] | None = None) -> int:
                  on_event=print_event, context=context, effort=effort,
                  max_time_s=args.max_time, lessons=args.lessons, prompt_set=args.prompt_set,
                  fix_reserve_s=args.fix_reserve, two_phase=args.two_phase,
-                 runs_root=args.runs, index=args.index)
+                 runs_root=args.runs, index=args.index,
+                 fixes=LoopFixes(finish_on_best=not args.no_finish_on_best,
+                                 edits_after_pass=not args.allow_rewrites))
     return report(result)
 
 

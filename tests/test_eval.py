@@ -540,3 +540,35 @@ def test_a_call_articraft_never_recorded_is_priced_and_only_interruptions_rerun(
     clean = baseline.convert(other, fake_articraft_run(other.folder, "success"), None, 100,
                              started, s)
     assert clean["cost_estimated_usd"] == 0
+
+
+# ---- the two success metrics (step 13 wrap-up) ---------------------------------------------
+
+
+def test_strict_success_and_holding_a_passing_build(tmp_path) -> None:
+    from eval_report import holds_passing_build, strict_success
+
+    passing = {"version": "v0001", "passed_checks": True, "path": "result/v0001"}
+    assert strict_success({"status": "success", "reason": "finished", "best": passing})
+    finished_on_best = {"status": "success", "best": passing,
+                        "reason": "finished on best build v0001: the time ran out"}
+    assert not strict_success(finished_on_best) and holds_passing_build(finished_on_best)
+    timed_out = {"status": "time_exceeded", "reason": "x", "best": passing}
+    assert not strict_success(timed_out) and holds_passing_build(timed_out)
+    failed = {"status": "no_progress", "reason": "x",
+              "best": {"version": "last_failed", "passed_checks": False}}
+    assert not holds_passing_build(failed) and not holds_passing_build(None)
+    # Articraft: a compile that passed its own checks, read from its conversation.
+    run = tmp_path / "articraft" / "run1"
+    run.mkdir(parents=True)
+    passed = {"output": json.dumps({"result": {"status": "success",
+                                               "compile_signals": "<compile_signals>"}})}
+    failing = {"output": json.dumps({"result": {"status": "error",
+                                                "compile_signals": "<compile_signals>"}})}
+    (run / "conversation.jsonl").write_text(json.dumps(failing) + "\n", encoding="utf-8")
+    record = {"system": "articraft", "status": "error", "run_dir": str(tmp_path),
+              "articraft_run": "articraft/run1"}
+    assert not holds_passing_build(record)
+    with (run / "conversation.jsonl").open("a", encoding="utf-8") as out:
+        out.write(json.dumps(passed) + "\n")
+    assert holds_passing_build(record)

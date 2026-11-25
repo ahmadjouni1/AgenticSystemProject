@@ -8,7 +8,7 @@ import re
 import pytest
 
 import agent.loop as loop
-from agent.loop import FIX_RESERVE_S, MAX_TIME_S, PROMPT_SETS, EffortPolicy, run
+from agent.loop import FIX_RESERVE_S, MAX_TIME_S, PROMPT_SETS, EffortPolicy, LoopFixes, run
 from llm import Budget, ScriptedModel
 
 LAPTOP_DOC = PROMPT_SETS["v0"].quickstart  # step 9's quickstart: a known-good laptop
@@ -99,8 +99,9 @@ def test_time_up_with_a_failing_compile_is_time_exceeded(tmp_path, clock) -> Non
 
 def test_time_up_after_an_edit_since_the_passing_compile_is_time_exceeded(tmp_path,
                                                                           clock) -> None:
+    # The step 10b behaviour, with the step 13 loop fixes off (see test_solvers.py for them on).
     result, _model = go(tmp_path, [write(GOOD), COMPILE, write(DETAIL), DONE], [600], clock,
-                        max_time_s=1500)
+                        max_time_s=1500, fixes=LoopFixes(False, False))
     assert result.status == "time_exceeded"  # a passing build exists, but main.py changed
 
 
@@ -123,7 +124,7 @@ def test_a_fix_cycle_starts_with_enough_time_left(tmp_path, clock) -> None:
 
 def test_two_phase_asks_for_a_skeleton_then_for_detail(tmp_path, clock) -> None:
     result, model = go(tmp_path, [write(GOOD), COMPILE, write(DETAIL), COMPILE, DONE], [10],
-                       clock, two_phase=True)
+                       clock, two_phase=True, fixes=LoopFixes(False, False))
     assert result.status == "success", result.reason
     first_task = model.requests[0][0][2].content
     assert "Phase 1 (now): write a skeleton" in first_task and "a laptop" in first_task
@@ -138,7 +139,8 @@ def test_two_phase_asks_for_a_skeleton_then_for_detail(tmp_path, clock) -> None:
 
 def test_two_phase_keeps_the_skeleton_as_the_fallback_build(tmp_path, clock) -> None:
     result, _model = go(tmp_path, [write(GOOD), COMPILE, write(BAD), COMPILE, READ_MAIN, DONE],
-                        [400], clock, two_phase=True, max_time_s=1500, fix_reserve_s=0)
+                        [400], clock, two_phase=True, max_time_s=1500, fix_reserve_s=0,
+                        fixes=LoopFixes(False, False))
     assert result.status == "time_exceeded"
     assert result.best == {"version": "v0000", "passed_checks": True, "path": "result/v0000"}
     assert result.record["two_phase"]["phase"] == 2

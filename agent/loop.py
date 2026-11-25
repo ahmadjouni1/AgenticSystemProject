@@ -151,6 +151,27 @@ class EffortPolicy:
     planning_effort: str | None = None
 
 
+@dataclass(frozen=True)
+class LoopFixes:
+    """Step 13 wrap-up. Implemented and tested with scripted models; not yet measured live.
+
+    ``finish_on_best``: when the time runs out and the latest compile is not a fresh pass,
+    end on the latest passing build (it passed every check, the trajectory check included)
+    as a success, "finished on best build", instead of ``time_exceeded``. synth_v3's two
+    pump runs had a passing, path-checked build and still ended ``time_exceeded``.
+
+    ``edits_after_pass``: once a build has passed, refuse a whole-file ``write`` of
+    main.py and ask for ``edit``. Both synth_v3 pump runs replaced their passing skeleton
+    with one big rewrite that failed, and ran out of time fixing it."""
+    finish_on_best: bool = True
+    edits_after_pass: bool = True
+
+
+FINISHED_ON_BEST = "finished on best build"
+WRITE_REFUSED_HINT = ("add detail with edit (small exact replacements) and compile after each, "
+                      "so a failure is always in the newest change")
+
+
 @dataclass
 class RunResult:
     status: str
@@ -291,8 +312,10 @@ class _Run:
                  context: ContextPolicy | None, effort: EffortPolicy | None,
                  max_time_s: float | None, lessons: bool, prompt_set: PromptSet,
                  fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False,
-                 saved: storage.Saved | None = None, index: Path | None = None):
+                 saved: storage.Saved | None = None, index: Path | None = None,
+                 fixes: LoopFixes = LoopFixes()):
         self.prompt, self.model, self.budget, self.max_turns = prompt, model, budget, max_turns
+        self.fixes = fixes
         self.context, self.effort, self.max_time_s, self.lessons = (context, effort, max_time_s,
                                                                     lessons)
         self.prompt_set = prompt_set
@@ -457,6 +480,7 @@ class _Run:
             "max_time_s": self.max_time_s,
             "fix_reserve_s": self.fix_reserve_s,
             "time_limit": self.time_limit,
+            "finished_on_best_build": reason.startswith(FINISHED_ON_BEST),
             "two_phase": None if not self.two_phase else {
                 "phase": self.phase, "skeleton": self.skeleton,
                 "detail_compiles": self.detail_compiles},
@@ -481,6 +505,7 @@ class _Run:
                 "context": "none" if self.context is None else "v1",
                 "effort": None if self.effort is None else asdict(self.effort),
                 "prompt_set": self.prompt_set.name, "two_phase": self.two_phase,
+                "fixes": asdict(self.fixes),
                 "lessons": self.lessons, "fix_reserve_s": self.fix_reserve_s}
 
     def session_entry(self, status: str, reason: str) -> dict[str, Any]:
@@ -605,9 +630,26 @@ class _Run:
             note = self.context.doc_note(call.arguments.get("path"))
             if note is not None:  # rule c: a doc that is already in the context
                 return ToolOutput("read", note, json.dumps(note), [], False)
+        refused = self.refuse_write(call)
+        if refused is not None:
+            return refused
         if call.name not in {tool.name for tool in self.tools}:  # synthesize off: unknown
             return run_tool(self.ctx, f"{call.name} (not offered)", call.arguments)
         return run_tool(self.ctx, call.name, call.arguments)
+
+    def refuse_write(self, call) -> ToolOutput | None:
+        """``fixes.edits_after_pass``: no whole-file write of main.py once a build passed."""
+        if not self.fixes.edits_after_pass or call.name != "write":
+            return None
+        path = str(call.arguments.get("path", "")).replace("\\", "/").removeprefix("./")
+        best = best_build(self.run_dir)
+        if path != "main.py" or best is None or not best["passed_checks"]:
+            return None
+        data = {"error_kind": "write_refused",
+                "message": f"main.py already has a passing build ({best['version']}); a "
+                           "whole-file write would replace it",
+                "hint": WRITE_REFUSED_HINT}
+        return ToolOutput("write", data, json.dumps(data), [], True)
 
     def after_compile(self) -> dict[str, Any]:
         result = self.ctx.last_compile
@@ -697,15 +739,26 @@ class _Run:
             if self.finish_blocker() is None:
                 return self.final_turn(elapsed)
             self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "stopped"}
-            return "time_exceeded", (f"stopped after {elapsed:.0f} s (the limit is "
-                                     f"{self.max_time_s:.0f} s)")
+            return self.time_up(f"stopped after {elapsed:.0f} s (the limit is "
+                                f"{self.max_time_s:.0f} s)")
         left = self.max_time_s - elapsed
         if self.fix_reserve_s and left < self.fix_reserve_s and self.fix_cycle_starts():
             self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "no_fix_cycle"}
-            return "time_exceeded", (f"stopped after {elapsed:.0f} s: {left:.0f} s left, less "
-                                     f"than a fix cycle needs ({self.fix_reserve_s:.0f} s; the "
-                                     f"limit is {self.max_time_s:.0f} s)")
+            return self.time_up(f"stopped after {elapsed:.0f} s: {left:.0f} s left, less than "
+                                f"a fix cycle needs ({self.fix_reserve_s:.0f} s; the limit is "
+                                f"{self.max_time_s:.0f} s)")
         return None
+
+    def time_up(self, reason: str) -> tuple[str, str]:
+        """The time is up without a fresh passing compile: ``time_exceeded``, or (with
+        ``fixes.finish_on_best``) a success on the latest build that passed every check."""
+        best = best_build(self.run_dir)
+        if self.fixes.finish_on_best and best is not None and best["passed_checks"]:
+            if self.time_limit is not None:
+                self.time_limit["outcome"] = "finished_on_best_build"
+            return "success", (f"{FINISHED_ON_BEST} {best['version']}: the time ran out after "
+                               f"later changes that did not pass ({reason})")
+        return "time_exceeded", reason
 
     def final_turn(self, elapsed: float) -> tuple[str, str]:
         """Time is up with a passing, fresh compile: one last call for the summary. Tool calls
@@ -842,9 +895,8 @@ class _Run:
                 if self.finish_blocker() is None:
                     return self.final_turn(elapsed)
                 self.time_limit = {"elapsed_s": round(elapsed, 1), "outcome": "call_cut"}
-                return "time_exceeded", (f"the model call was cut off at the time limit after "
-                                         f"{elapsed:.0f} s (the limit is "
-                                         f"{self.max_time_s:.0f} s)")
+                return self.time_up(f"the model call was cut off at the time limit after "
+                                    f"{elapsed:.0f} s (the limit is {self.max_time_s:.0f} s)")
             except BudgetExceeded as exc:
                 if exc.reply is not None:  # paid for: keep it in the record
                     metrics.update(self.account(exc.reply))
@@ -949,7 +1001,7 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
         max_time_s: float | None = MAX_TIME_S, lessons: bool = False,
         prompt_set: str | PromptSet = DEFAULT_PROMPT_SET,
         fix_reserve_s: float = FIX_RESERVE_S, two_phase: bool = False,
-        index: str | Path | None = None) -> RunResult:
+        index: str | Path | None = None, fixes: LoopFixes = LoopFixes()) -> RunResult:
     """Run the agent on ``prompt`` until it finishes with a checked build, or stops.
 
     ``context``: the context policy (agent/context.py), or None to send the full history.
@@ -971,7 +1023,8 @@ def run(prompt: str, model: Model, budget: Budget, max_turns: int = MAX_TURNS, *
     _wire(model, budget, run_dir)
     index = Path(index) if index is not None else storage.default_index(run_dir, runs_root)
     return _Run(prompt, model, budget, max_turns, run_dir, compiler, on_event, context, effort,
-                max_time_s, lessons, prompt_set, fix_reserve_s, two_phase, index=index).run()
+                max_time_s, lessons, prompt_set, fix_reserve_s, two_phase, index=index,
+                fixes=fixes).run()
 
 
 def _wire(model: Model, budget: Budget, run_dir: Path) -> None:
@@ -995,6 +1048,7 @@ def saved_options(record: dict[str, Any]) -> dict[str, Any]:
     options.setdefault("two_phase", bool(record.get("two_phase")))
     options.setdefault("lessons", bool(record.get("lessons")))
     options.setdefault("fix_reserve_s", record.get("fix_reserve_s", FIX_RESERVE_S))
+    options.setdefault("fixes", {"finish_on_best": False, "edits_after_pass": False})  # older
     return options
 
 
@@ -1018,9 +1072,11 @@ def resume(run_dir: str | Path, model: Model, budget: Budget, max_turns: int = M
     return _Run(saved.record["prompt"], model, budget, max_turns, saved.run_dir, compiler,
                 on_event, context, effort, max_time_s, bool(options["lessons"]),
                 PROMPT_SETS[options["prompt_set"]], float(options["fix_reserve_s"]),
-                bool(options["two_phase"]), saved=saved, index=index).run()
+                bool(options["two_phase"]), saved=saved, index=index,
+                fixes=LoopFixes(**options["fixes"])).run()
 
 
 __all__ = ["DEFAULT_PROMPT_SET", "FINAL_TURN_S", "FIX_RESERVE_S", "MAX_TIME_S", "MAX_TURNS",
+           "FINISHED_ON_BEST", "LoopFixes",
            "PROMPT_SETS", "EffortPolicy", "PromptSet", "RunResult", "best_build", "new_run_dir",
            "resume", "run", "saved_options"]

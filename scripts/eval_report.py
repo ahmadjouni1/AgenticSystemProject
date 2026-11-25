@@ -147,6 +147,50 @@ def failure_kinds(record: dict[str, Any]) -> list[str]:
 # ---- tables -------------------------------------------------------------------------------------
 
 
+FINISHED_ON_BEST = "finished on best build"  # agent.loop's label (step 13 loop fix)
+
+
+def strict_success(record: dict[str, Any] | None) -> bool:
+    """**Strict success** (the metric since step 8): the run ended ``success`` because its
+    latest compile passed every check and the model finished. A run that ``finished on best
+    build`` at the time limit (step 13 loop fix) is not a strict success."""
+    return bool(record) and record.get("status") == "success" and not str(
+        record.get("reason", "")).startswith(FINISHED_ON_BEST)
+
+
+def holds_passing_build(record: dict[str, Any] | None) -> bool:
+    """**Ends holding a passing build** (step 13): the run's best build passed every check
+    (the trajectory check too when main.py declared one: it is blocking, so a version
+    cannot exist without it). For an Articraft baseline run: a compile passed Articraft's
+    own checks (its USDZ is written on every compile, so a file proves nothing)."""
+    if not record:
+        return False
+    if record.get("system") == "articraft":
+        return articraft_compile_passed(record)
+    return bool((record.get("best") or {}).get("passed_checks"))
+
+
+def articraft_compile_passed(record: dict[str, Any]) -> bool:
+    if record.get("status") == "success":
+        return True
+    run = record.get("articraft_run")
+    path = Path(record.get("run_dir", "")) / run / "conversation.jsonl" if run else None
+    if path is None or not path.is_file():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        message = json.loads(line)
+        output = message.get("output")
+        if not isinstance(output, str) or "compile_signals" not in output:
+            continue
+        try:
+            result = json.loads(output).get("result") or {}
+        except json.JSONDecodeError:
+            continue
+        if result.get("status") == "success":
+            return True
+    return False
+
+
 def success_rows(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[list[str]]:
     out = []
     groups = [(f"{c} ({benchmark['categories'][c]})", [r for r in rows if r["category"] == c])
@@ -155,10 +199,13 @@ def success_rows(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[
     for label, group in groups:
         group = [r for r in group if r["record"]]
         n = len(group)
-        k = sum(r["status"] == "success" for r in group)
+        k = sum(strict_success(r["record"]) for r in group)
+        held = sum(holds_passing_build(r["record"]) for r in group)
         low, high = wilson(k, n)
+        held_low, held_high = wilson(held, n)
         out.append([label, f"{k}/{n}", fmt(k / n if n else None, ".0%"),
-                    f"{low:.0%}-{high:.0%}" if n else "-"])
+                    f"{low:.0%}-{high:.0%}" if n else "-", f"{held}/{n}",
+                    f"{held_low:.0%}-{held_high:.0%}" if n else "-"])
     return out
 
 
@@ -169,7 +216,7 @@ def cost_rows(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[lis
     groups.append(("**overall**", [r for r in rows if r["record"]]))
     for label, group in groups:
         records = [r["record"] for r in group]
-        k = sum(r["status"] == "success" for r in group)
+        k = sum(strict_success(r["record"]) for r in group)
         total = sum(float(r.get("cost_usd") or 0) for r in records)
         out.append([label, str(len(records)),
                     f"${total / len(records):.3f}" if records else "-",
@@ -246,8 +293,12 @@ def key_tables(benchmark: dict[str, Any], rows: list[dict[str, Any]]) -> list[st
             + (f" ({missing} prompts with none)" if missing else "")
             + ". With so few runs per category the "
             "intervals are wide: **indicative only**, not a measured difference.")
-    return ["## Success (Wilson 95% intervals)\n", note + "\n",
-            table(["category", "success", "rate", "95% interval"],
+    metrics = ("**Strict success**: the run ended with its latest compile passing every check "
+               "and a final message. **Holding a passing build**: its best build passed every "
+               "check, whatever the end state.")
+    return ["## Success (Wilson 95% intervals)\n", note + "\n", metrics + "\n",
+            table(["category", "strict success", "rate", "95% interval",
+                   "holding a passing build", "95% interval"],
                   success_rows(benchmark, rows)),
             "\n## Cost, time and turns (per run, means)\n",
             table(["category", "runs", "cost / run", "cost / success", "time / run",

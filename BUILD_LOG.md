@@ -3284,3 +3284,58 @@ Prompt set v2 as committed in `16ee664`, 4 closed-loop prompts x 2 runs, `--jobs
   1. A passing skeleton should count. When time runs out, finish with the latest *passing* build (the loop already keeps it; the time-up final turn could fire on the last passing build instead of requiring the latest compile to pass).
   2. Enforce "small edits" after a passing compile: refuse a whole-file `write` once a build has passed, so detail is added with `edit`.
   3. For the wipers, a two-rocker skeleton (one crank, two rockers through a second coupler), or tell the model the skeleton is one wiper and the second follows on a mimic joint.
+
+### Wrap-up (2026-11-25, no API calls; the balance is left untouched at about $1.3)
+
+**1. A second metric.** All reports now give two metrics side by side:
+
+- **Strict success** (unchanged): the run ended `success` on a fresh passing compile with a
+  final message. A run that "finished on best build" is not counted.
+- **Holding a passing build:** the best build passed every check, whatever the end state.
+  The trajectory check is blocking, so a version cannot exist without passing it.
+  - For Articraft runs, the test is that a compile passed Articraft's own checks. This is
+    read from its conversation, since its USDZ is written on every compile.
+
+Recomputed for every setup with `scripts/metrics_summary.py` (written to
+`runs/metrics_summary.md`), and also by `scripts/eval_report.py` and
+`scripts/synthesis_report.py`:
+
+| Setup | Counted runs | Strict success (95% interval) | Holding a passing build (95% interval) | Cost / run | Cost / strict success | Cost / passing build |
+| --- | --- | --- | --- | --- | --- | --- |
+| eval_v1 | 34 (+1 interrupted) | 26/34 (76%; 60-88%) | 27/34 (79%; 63-90%) | $0.165 | $0.216 | $0.208 |
+| Articraft baseline | 12 | 6/12 (50%; 25-75%) | 6/12 (50%; 25-75%) | $0.183 | $0.367 | $0.367 |
+| step 10b B2 | 12 | 10/12 (83%; 55-95%) | 10/12 (83%; 55-95%) | $0.114 | $0.137 | $0.137 |
+| synth_v1 | 3 (+2 interrupted) | 1/3 | 1/3 | $0.162 | $0.487 | $0.487 |
+| synth_v2 | 6 | 0/6 (0%; 0-39%) | 0/6 (0%; 0-39%) | $0.189 | - | - |
+| synth_v3 | 4 | 0/4 (0%; 0-49%) | 2/4 (50%; 15-85%) | $0.190 | - | $0.381 |
+
+The earlier step-10 variants also count one more run holding a passing build than strict
+successes: B 8 against 7, C 8 against 7, and step 10b D 10 against 9.
+
+**2. Two loop fixes** (`LoopFixes` in `agent/loop.py`, on by default; `--no-finish-on-best`
+and `--allow-rewrites` turn them off). **Implemented, and tested with scripted models only;
+not yet measured live.**
+
+- **Finish on best build.**
+  - **What it does:** when the time runs out without a fresh passing compile, the run ends
+    as `success` on the latest passing build. Its reason starts "finished on best build
+    vNNNN", and the record says `finished_on_best_build`.
+  - **Before:** such a run ended `time_exceeded`, with that passing build unused.
+- **Edits after a pass.**
+  - **What it does:** once a build has passed, a whole-file `write` of main.py is refused
+    with `write_refused` and a hint to use `edit`.
+  - **What stays allowed:** other files, and rewrites before the first pass.
+- **Resuming old runs:** records made before the fixes resume without them
+  (`saved_options`).
+- **Tests:** `tests/test_loop_fixes.py` (9) and `tests/test_eval.py` (+1, both metrics,
+  Articraft included). Three step 10b tests now run with the fixes off, since they test the
+  old behaviour.
+
+**3. Documents:**
+- `docs/RESULTS.md`: every experiment, both metrics, costs, findings and limitations.
+- `docs/HANDOFF.md`: the prioritized to-do list, with evidence and code locations.
+- `CLAUDE.md` and an identical `AGENTS.md`: the read order and the rules for coding agents.
+- `README.md`: headline results, the status of every step, how to run.
+
+**Total live spend over the project:** about $19.8 (steps 8-10b $9.1, eval_v1 $5.89,
+Articraft $2.29, synth_v1-v3 $2.54).

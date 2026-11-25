@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "scripts")]
 
-from eval_report import interrupted  # noqa: E402
+from eval_report import holds_passing_build, interrupted, strict_success  # noqa: E402
 
 RUNS = ROOT / "runs"
 PROMPTS = {"scissor_lift": "scissor lift", "windshield_wipers": "windshield wipers",
@@ -75,7 +75,7 @@ def row(label: str, runs: list[dict], cut: int, tool: bool) -> str:
     note = f" (+{cut} interrupted)" if cut else ""
     if not runs:
         return f"| {label} | 0 runs{note} | | | | | | | |"
-    ok = sum(r["status"] == "success" for r in runs)
+    ok = sum(strict_success(r) for r in runs)
     cost = sum(r["cost_usd"] for r in runs)
     per_success = f"${cost / ok:.3f}" if ok else "-"
     minutes = statistics.mean(r["duration_s"] for r in runs) / 60
@@ -84,7 +84,7 @@ def row(label: str, runs: list[dict], cut: int, tool: bool) -> str:
     checks = [path_check(r) for r in runs]
     passed = (f"{sum(p for _d, p in checks)}/{len(runs)} (declared {sum(d for d, _p in checks)})"
               if tool else "-")
-    kept = sum(bool((r.get("best") or {}).get("passed_checks")) for r in runs)
+    kept = sum(holds_passing_build(r) for r in runs)
     return (f"| {label} | {ok}/{len(runs)}{note} | ${cost / len(runs):.3f} | {per_success} | "
             f"{minutes:.1f} min | {reasoning / 1000:.0f}k | {use} | {passed} | {kept}/{len(runs)} |")
 
@@ -105,9 +105,9 @@ def per_run(setup: str, prompt: str, record: dict) -> str:
 
 
 def main() -> int:
-    head = ("| Prompt, setup | Success | Cost / run | Cost / success | Time | Reasoning before "
-            "first compile (median) | Tool used | Trajectory check passed | Best build "
-            "passed every check |\n"
+    head = ("| Prompt, setup | Strict success | Cost / run | Cost / strict success | Time | "
+            "Reasoning before first compile (median) | Tool used | Trajectory check passed | "
+            "Holding a passing build |\n"
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     lines = ["## Closed-loop prompts: no tool vs synth_v1, synth_v2 and synth_v3", "", head]
     totals = {setup: ([], 0) for setup in SETUPS}

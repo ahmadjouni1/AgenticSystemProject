@@ -15,6 +15,32 @@ Each step is recorded in [BUILD_LOG.md](BUILD_LOG.md):
 The study of the original that guides the steps is
 [docs/ARTICRAFT_STUDY.md](docs/ARTICRAFT_STUDY.md).
 
+**Start here:**
+- [docs/RESULTS.md](docs/RESULTS.md): every experiment, with its tables.
+- [docs/HANDOFF.md](docs/HANDOFF.md): what to do next.
+- [docs/SOLVERS.md](docs/SOLVERS.md): the dimensional-synthesis plug-ins.
+
+## Headline results
+
+All runs used DeepSeek `deepseek-v4-pro`. The samples are small, so the intervals are wide.
+
+| Setup | Strict success | Holding a passing build | Cost / run |
+| --- | --- | --- | --- |
+| Our agent on the 12-prompt benchmark (eval_v1, 3 runs each) | **26/34 (76%, 60-88%)** | 27/34 | $0.165 |
+| Articraft on the same benchmark (1 run each, its own checks) | 6/12 (50%, 25-75%) | 6/12 | $0.183 |
+| Our agent, step 10b B2 (4 development prompts x 3) | 10/12 | 10/12 | $0.114 |
+| Closed loops (wipers + pump), no tool | 3/6 | 3/6 | $0.229 |
+| Closed loops (wipers + pump), synthesis tool with a skeleton (synth_v3) | 0/4 | 2/4 | $0.190 |
+
+- **The two metrics.** *Strict success* means the run ended on a passing compile with a
+  final message. *Holding a passing build* means its best build passed every check.
+- **Open mechanisms are reliable:** single joints, independent joints and everyday tools
+  went 18/18.
+- **Closed loops are the weak spot,** and planning that runs into the 32k output limit is
+  the main failure cause, for Articraft too.
+- **The synthesis tool** answers correctly, but has not raised success yet. Two loop fixes
+  aimed at what synth_v3 showed are implemented and not yet measured live.
+
 ## Install and test
 
 You need Windows, macOS or Linux and [uv](https://docs.astral.sh/uv/). Development
@@ -25,8 +51,8 @@ uv sync
 uv run pytest -q
 ```
 
-The suite has 337 tests, none of which use the network. It takes about 2 min, most of it in the compiler tests, which
-start real subprocesses. The viewer's JavaScript tests run under Node.js if it is
+The suite has about 530 tests, none of which use the network. It takes 15-20 minutes,
+most of it in the compiler and solver tests, which start real subprocesses. The viewer's JavaScript tests run under Node.js if it is
 installed, and are skipped otherwise.
 
 Try the examples:
@@ -86,8 +112,21 @@ run, no new run past `--max-total` ($1.50), 2 at a time, resuming unfinished run
 rerun. `scripts/eval_report.py --name v1` writes the report (success with 95% intervals,
 cost, failures, quality, a render sheet per category) and adds its key tables to
 BUILD_LOG.md. `scripts/eval_rating.py` makes blind rating sheets and scores the filled-in
-CSV. `scripts/articraft_baseline.py` would run the same prompts through the original
-Articraft under WSL (prepared, not run: docs/ARTICRAFT_BASELINE.md).
+CSV. `scripts/articraft_baseline.py` runs the same prompts through the original
+Articraft under WSL (docs/ARTICRAFT_BASELINE.md). `scripts/metrics_summary.py` gives both
+success metrics for every evaluated setup.
+
+**Dimensional synthesis (step 13).**
+- **The tool:** `--agent-args "--prompt-set v2"` (or `python -m agent --prompt-set v2`)
+  offers the `synthesize` tool. It handles four-bars and slider-cranks (path, rocker
+  sweep or slider stroke) and serial arms, and returns the dimensions and a skeleton
+  `main.py` that already compiles.
+- **The check:** `target_path` in `main.py` makes compile check the motion.
+- **Offline measurements:** `scripts/synthesis_bench.py` times the solvers;
+  `scripts/synthesis_report.py` compares the closed-loop re-tests.
+- **The loop fixes, on by default:** at the time limit, a run finishes on its latest
+  passing build ("finished on best build"), and whole-file rewrites of main.py are refused
+  once a build passed. `--no-finish-on-best` and `--allow-rewrites` turn them off.
 
 A run that stopped (time, budget, a crash) continues with `--resume <run folder>`, from its
 `conversation.jsonl` and workspace, with a new `--max-time` / `--max-cost` / `--max-calls`
@@ -112,9 +151,10 @@ uv run python scripts/tools_demo.py
 | `llm/` | The LLM client: one `query(messages, tools) -> Reply` protocol, OpenAI and DeepSeek via the `openai` package, usage and cost per call, per-run budget, retries, a call log, and `ScriptedModel` for tests. Roles and prices are in `llm/config.py` |
 | `prompts/` | The system prompt (v1), step 9's frozen prompt and docs (`v0/`), the starter `main.py`, and every evaluation prompt (`eval_prompts.json`) |
 | `agent/` | The agent loop (`python -m agent`: turns, stop rule, end states, run folder with `record.json`) and its tools: `read`, `write`, `edit`, `compile`, `render` (CPU PNG views), `probe` (positions, gaps, collisions at a pose). Structured errors, workspace-only paths, no shell |
+| `solvers/` | Dimensional synthesis: our teammate's nested solver (`solvers/nested/`, unmodified), the plug-in interface with a subprocess timeout, serial arms, four-bar and slider-crank (path and function targets), and the skeleton `main.py` generator |
 | `tests/` | pytest suite, with a small standalone URDF forward-kinematics reader |
 | `scripts/` | Benchmarks and the generator for `docs/SHAPE_HELPERS.md` |
-| `docs/` | The Articraft study, the ranked table of its shape helpers, and `docs/sdk/`: the agent's SDK docs (quickstart with a complete example, shapes, joints and loops, testing; every example is compiled by the tests) |
+| `docs/` | Results, handoff and solver notes, the Articraft study and baseline setup, the ranked table of its shape helpers, and `docs/sdk/`: the agent's SDK docs (quickstart with a complete example, shapes, joints and loops, testing, synthesis; every example is compiled by the tests) |
 
 ## Build status
 
@@ -134,8 +174,8 @@ The steps follow the parts of the original listed in the study.
 | 10 | System prompt v1 (short written plan, realism rules, finish checklist) and SDK docs (quickstart, shapes, joints and loops, testing); quality metrics and final renders per run; A/B/C experiment (more detailed objects; planning reasoning not reduced) | Done |
 | 10b | Fixes from the step 10 failure analysis: 25-minute limit with a final turn and a fix reserve, joint contact rule and recipes, soft-failing helpers, a compiler fix on Windows; `--two-phase` (optional high-detail mode); every model call capped at the time left | Done: B2 (the new default) 10/12 at $0.137 per success; D (two-phase) 9/12 at $0.194, more detail |
 | 11 | Run storage: messages to and from dicts, `--resume` (time_exceeded, budget_exceeded, a crash) with a new allowance and a list of sessions, `--list`, `runs/index.jsonl`, atomic writes | Done |
-| 12 | Evaluation harness: 12-prompt benchmark in 5 categories, `scripts/eval.py` (spend caps, resume on rerun), report with confidence intervals and render sheets, blind human rating, Articraft baseline adapter (WSL, prepared) | Built; not run yet |
-| 13 | Extras (images, simulation, trajectories) | Planned |
+| 12 | Evaluation harness: 12-prompt benchmark in 5 categories, `scripts/eval.py` (spend caps, resume on rerun), report with confidence intervals and render sheets, blind human rating, Articraft baseline (WSL) | Done: eval_v1 26/34 at $0.216 per success; Articraft 6/12 at $0.367 |
+| 13 | Dimensional synthesis: the teammate's solver as plug-ins (serial arms; four-bar and slider-crank with path, sweep and stroke targets), the `synthesize` tool and prompt set v2, a skeleton `main.py`, the `target_path` check, a second success metric, and two loop fixes | Built and tested offline; three live re-tests (synth_v1-v3) gave no strict success gain, 2/4 runs holding a passing build in synth_v3; the loop fixes are not yet measured live |
 
 **Known risk: there is no sandbox.** As in Articraft, the compiler runs model-written
 code with your own permissions. Only `*_API_KEY` / `*_TOKEN` environment variables are
@@ -146,6 +186,9 @@ removed. See BUILD_LOG.md, step 3.
 This project is inspired by **Articraft**:
 [github.com/mattzh72/articraft](https://github.com/mattzh72/articraft), and its
 research paper, [arXiv:2605.15187](https://arxiv.org/abs/2605.15187).
+
+`solvers/nested/` is our teammate's nested dimensional synthesis solver, copied
+unmodified (solvers/nested/ATTRIBUTION.md).
 
 It includes code adapted from Articraft, which is licensed under the Apache License 2.0.
 Every file that contains adapted code says so at the top. [NOTICE](NOTICE) lists what was
